@@ -137,20 +137,24 @@ export class SessionManager {
       });
 
       // Edit the thinking message with the actual response, or send new if edit fails
+      const responseText = result.result?.trim()
+        ? result.result
+        : result.error || "(No response from engine)";
+
       if (thinkingTs) {
         await connector.editMessage(
           { channel: target.channel, thread: target.thread || target.messageTs, messageTs: thinkingTs },
-          result.result,
+          responseText,
         ).catch(async () => {
           await connector.sendMessage(
             { channel: target.channel, thread: target.thread || target.messageTs },
-            result.result,
+            responseText,
           );
         });
       } else {
         await connector.sendMessage(
           { channel: target.channel, thread: target.thread || target.messageTs },
-          result.result,
+          responseText,
         );
       }
 

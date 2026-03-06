@@ -71,15 +71,20 @@ export class SlackConnector implements Connector {
     logger.info("Slack connector stopped");
   }
 
-  async sendMessage(target: Target, text: string) {
+  async sendMessage(target: Target, text: string): Promise<string | undefined> {
+    if (!text || !text.trim()) return undefined;
     const chunks = formatResponse(text);
+    let lastTs: string | undefined;
     for (const chunk of chunks) {
-      await this.app.client.chat.postMessage({
+      if (!chunk.trim()) continue;
+      const res = await this.app.client.chat.postMessage({
         channel: target.channel,
         thread_ts: target.thread,
         text: chunk,
       });
+      lastTs = res.ts;
     }
+    return lastTs;
   }
 
   async addReaction(target: Target, emoji: string) {
@@ -110,6 +115,7 @@ export class SlackConnector implements Connector {
 
   async editMessage(target: Target, text: string) {
     if (!target.messageTs) return;
+    if (!text || !text.trim()) return;
     await this.app.client.chat.update({
       channel: target.channel,
       ts: target.messageTs,
