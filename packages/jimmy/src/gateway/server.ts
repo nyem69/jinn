@@ -2,6 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { JimmyConfig, Connector, Employee } from "../shared/types.js";
 import { loadConfig } from "../shared/config.js";
@@ -86,6 +87,8 @@ export type GatewayCleanup = () => Promise<void>;
 export async function startGateway(
   config: JimmyConfig,
 ): Promise<GatewayCleanup> {
+  const bootId = randomUUID().slice(0, 8);
+
   // Configure logging
   configureLogger({
     level: config.logging.level,
@@ -94,7 +97,7 @@ export async function startGateway(
   });
 
   const gatewayName = config.portal?.portalName || "Jimmy";
-  logger.info(`Starting ${gatewayName} gateway...`);
+  logger.info(`Starting ${gatewayName} gateway (boot ${bootId}, pid ${process.pid})...`);
 
   // Initialize database and recover any sessions stuck from a previous run
   initDb();
@@ -115,6 +118,7 @@ export async function startGateway(
     const timeouts = {
       idleTimeoutMinutes: cfg.connectors?.web?.idleTimeoutMinutes ?? 60,
       hardTimeoutHours: cfg.connectors?.web?.hardTimeoutHours ?? 24,
+      turnStallMinutes: cfg.connectors?.web?.turnStallMinutes ?? 10,
     };
     claudeEngine.setTimeouts(timeouts);
     codexEngine.setTimeouts(timeouts);
@@ -298,7 +302,7 @@ export async function startGateway(
 
   await new Promise<void>((resolve) => {
     server.listen(port, host, () => {
-      logger.info(`${gatewayName} gateway listening on http://${host}:${port}`);
+      logger.info(`${gatewayName} gateway listening on http://${host}:${port} (boot ${bootId})`);
       resolve();
     });
   });
@@ -306,6 +310,10 @@ export async function startGateway(
   // Return cleanup function
   return async () => {
     logger.info("Gateway cleanup starting...");
+
+    // Terminate live engine subprocesses before tearing down the gateway.
+    claudeEngine.killAll();
+    codexEngine.killAll();
 
     // Stop bidirectional sweep loops
     claudeEngine.stopSweep();

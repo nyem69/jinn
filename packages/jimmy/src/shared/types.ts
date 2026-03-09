@@ -17,16 +17,18 @@ export interface Engine {
  * The gateway checks for this at runtime to decide steering vs queueing.
  */
 export interface BidirectionalEngine extends Engine {
+  /** Whether this engine can accept mid-turn input for the live session */
+  canSteer(sessionId: string): boolean;
   /** Send a follow-up message to a running bidirectional session */
   steer(sessionId: string, message: string): void;
   /** Kill a running engine process (for interrupt) */
-  kill(sessionId: string): void;
+  kill(sessionId: string, reason?: string): void;
   /** Check if a bidirectional process is alive for this session */
   isAlive(sessionId: string): boolean;
 }
 
 export function isBidirectionalEngine(engine: Engine): engine is BidirectionalEngine {
-  return "steer" in engine && "kill" in engine && "isAlive" in engine;
+  return "canSteer" in engine && "steer" in engine && "kill" in engine && "isAlive" in engine;
 }
 
 export interface EngineRunOpts {
@@ -148,6 +150,7 @@ export interface WebConnectorConfig {
   bidirectional?: boolean;
   idleTimeoutMinutes?: number;
   hardTimeoutHours?: number;
+  turnStallMinutes?: number;
 }
 
 export interface PortalConfig {

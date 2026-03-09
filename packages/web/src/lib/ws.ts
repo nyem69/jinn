@@ -1,6 +1,9 @@
 type EventHandler = (event: string, payload: unknown) => void;
 
-export function createGatewaySocket(onEvent: EventHandler): { close: () => void } {
+export function createGatewaySocket(
+  onEvent: EventHandler,
+  opts?: { onOpen?: () => void; onClose?: () => void },
+): { close: () => void } {
   const wsUrl =
     typeof window !== "undefined"
       ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`
@@ -13,6 +16,9 @@ export function createGatewaySocket(onEvent: EventHandler): { close: () => void 
   function connect() {
     if (closed) return;
     ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      opts?.onOpen?.();
+    };
     ws.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
@@ -22,6 +28,7 @@ export function createGatewaySocket(onEvent: EventHandler): { close: () => void 
       }
     };
     ws.onclose = () => {
+      opts?.onClose?.();
       if (!closed) reconnectTimer = setTimeout(connect, 3000);
     };
     ws.onerror = () => ws?.close();

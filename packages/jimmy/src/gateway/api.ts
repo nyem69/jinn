@@ -2,8 +2,10 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
-import type { JimmyConfig } from "../shared/types.js";
+import type { Engine, JimmyConfig, Session } from "../shared/types.js";
 import type { SessionManager } from "../sessions/manager.js";
+import { buildContext } from "../sessions/context.js";
+import { RESTARTING_TURN_REASON } from "../sessions/queue.js";
 import {
   listSessions,
   getSession,
@@ -22,6 +24,7 @@ import {
   LOGS_DIR,
 } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
+import { JIMMY_HOME } from "../shared/paths.js";
 
 export interface ApiContext {
   config: JimmyConfig;
@@ -30,6 +33,45 @@ export interface ApiContext {
   getConfig: () => JimmyConfig;
   emit: (event: string, payload: unknown) => void;
   connectors: Map<string, import("../shared/types.js").Connector>;
+}
+
+function dispatchWebSessionRun(
+  session: Session,
+  prompt: string,
+  engine: Engine,
+  config: JimmyConfig,
+  context: ApiContext,
+  opts?: { delayMs?: number },
+): void {
+  const run = async () => {
+    await context.sessionManager.getQueue().enqueue(session.sourceRef, async () => {
+      context.emit("session:started", { sessionId: session.id });
+      await runWebSession(session, prompt, engine, config, context);
+    });
+  };
+
+  const launch = () => {
+    run().catch((err) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger.error(`Web session ${session.id} dispatch error: ${errMsg}`);
+      updateSession(session.id, {
+        status: "error",
+        lastActivity: new Date().toISOString(),
+        lastError: errMsg,
+      });
+      context.emit("session:completed", {
+        sessionId: session.id,
+        result: null,
+        error: errMsg,
+      });
+    });
+  };
+
+  if (opts?.delayMs && opts.delayMs > 0) {
+    setTimeout(launch, opts.delayMs);
+  } else {
+    launch();
+  }
 }
 
 function readBody(req: HttpRequest): Promise<string> {
@@ -198,28 +240,7 @@ export async function handleApiRequest(
       });
       session.status = "running";
 
-      context.emit("session:started", { sessionId: session.id });
-      runWebSession(session, prompt, engine, config, context).catch((err) => {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        logger.error(`Web session ${session.id} error: ${errMsg}`);
-        updateSession(session.id, {
-          status: "error",
-          lastError: errMsg,
-        });
-        context.emit("session:completed", {
-          sessionId: session.id,
-          result: null,
-          error: errMsg,
-        });
-      }).finally(() => {
-        // Safety net: if session is still "running" after everything, force to error
-        const current = getSession(session.id);
-        if (current && current.status === "running") {
-          logger.warn(`Session ${session.id} still "running" after completion — forcing to error`);
-          updateSession(session.id, { status: "error", lastError: "Session failed to complete (status stuck)" });
-          context.emit("session:completed", { sessionId: session.id, result: null, error: "Session failed to complete" });
-        }
-      });
+      dispatchWebSessionRun(session, prompt, engine, config, context);
 
       return json(res, session, 201);
     }
@@ -260,50 +281,15 @@ export async function handleApiRequest(
         if (midTurnResult === "interrupted") {
           // Kill happened — start a new turn with --resume after a brief delay
           context.emit("session:interrupted", { sessionId: session.id });
-          setTimeout(() => {
-            context.emit("session:started", { sessionId: session.id });
-            runWebSession(session, prompt, engine, config, context).catch((err) => {
-              const errMsg = err instanceof Error ? err.message : String(err);
-              logger.error(`Web session ${session.id} error after interrupt: ${errMsg}`);
-              updateSession(session.id, { status: "error", lastError: errMsg });
-              context.emit("session:completed", { sessionId: session.id, result: null, error: errMsg });
-            }).finally(() => {
-              const current = getSession(session.id);
-              if (current && current.status === "running") {
-                logger.warn(`Session ${session.id} still "running" after interrupt completion — forcing to error`);
-                updateSession(session.id, { status: "error", lastError: "Session failed to complete (status stuck)" });
-                context.emit("session:completed", { sessionId: session.id, result: null, error: "Session failed to complete" });
-              }
-            });
-          }, 500);
+          dispatchWebSessionRun(session, prompt, engine, config, context, { delayMs: 500 });
           return json(res, { status: "interrupted", sessionId: session.id });
         }
 
-        // midTurnResult === "queued" — fall through to normal queue behavior
+        // midTurnResult === "queued" — schedule a real queued follow-up turn
         context.emit("session:queued", { sessionId: session.id, message: prompt });
       }
 
-      context.emit("session:started", { sessionId: session.id });
-      runWebSession(session, prompt, engine, config, context).catch((err) => {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        logger.error(`Web session ${session.id} error: ${errMsg}`);
-        updateSession(session.id, {
-          status: "error",
-          lastError: errMsg,
-        });
-        context.emit("session:completed", {
-          sessionId: session.id,
-          result: null,
-          error: errMsg,
-        });
-      }).finally(() => {
-        const current = getSession(session.id);
-        if (current && current.status === "running") {
-          logger.warn(`Session ${session.id} still "running" after message completion — forcing to error`);
-          updateSession(session.id, { status: "error", lastError: "Session failed to complete (status stuck)" });
-          context.emit("session:completed", { sessionId: session.id, result: null, error: "Session failed to complete" });
-        }
-      });
+      dispatchWebSessionRun(session, prompt, engine, config, context);
 
       return json(res, { status: "queued", sessionId: session.id });
     }
@@ -678,13 +664,6 @@ function loadTranscriptMessages(engineSessionId: string): Array<{ role: string; 
   return [];
 }
 
-/**
- * Run an engine for a web session and emit results via WebSocket.
- */
-import { buildContext } from "../sessions/context.js";
-import { JIMMY_HOME } from "../shared/paths.js";
-import type { Engine, Session } from "../shared/types.js";
-
 async function runWebSession(
   session: Session,
   prompt: string,
@@ -692,12 +671,13 @@ async function runWebSession(
   config: JimmyConfig,
   context: ApiContext,
 ): Promise<void> {
-  logger.info(`Web session ${session.id} running engine "${session.engine}" (model: ${session.model || "default"})`);
+  const currentSession = getSession(session.id) ?? session;
+  logger.info(`Web session ${currentSession.id} running engine "${currentSession.engine}" (model: ${currentSession.model || "default"})`);
 
   // Ensure status is "running" (may already be set by the POST handler)
-  const currentStatus = getSession(session.id);
+  const currentStatus = getSession(currentSession.id);
   if (currentStatus && currentStatus.status !== "running") {
-    updateSession(session.id, {
+    updateSession(currentSession.id, {
       status: "running",
       lastActivity: new Date().toISOString(),
     });
@@ -706,67 +686,89 @@ async function runWebSession(
   try {
     // If this session has an assigned employee, load their persona
     let employee: import("../shared/types.js").Employee | undefined;
-    if (session.employee) {
+    if (currentSession.employee) {
       const { findEmployee } = await import("./org.js");
       const { scanOrg } = await import("./org.js");
       const registry = scanOrg();
-      employee = findEmployee(session.employee, registry);
+      employee = findEmployee(currentSession.employee, registry);
     }
 
     const systemPrompt = buildContext({
       source: "web",
-      channel: session.sourceRef,
+      channel: currentSession.sourceRef,
       user: "web-user",
       employee,
       connectors: Array.from(context.connectors.keys()),
       config,
-      sessionId: session.id,
+      sessionId: currentSession.id,
     });
 
-    const engineConfig = session.engine === "codex"
+    const engineConfig = currentSession.engine === "codex"
       ? config.engines.codex
       : config.engines.claude;
+    let lastHeartbeatAt = 0;
+    const runHeartbeat = setInterval(() => {
+      updateSession(currentSession.id, {
+        status: "running",
+        lastActivity: new Date().toISOString(),
+      });
+    }, 5000);
 
     const result = await engine.run({
       prompt,
-      resumeSessionId: session.engineSessionId ?? undefined,
+      resumeSessionId: currentSession.engineSessionId ?? undefined,
       systemPrompt,
       cwd: JIMMY_HOME,
       bin: engineConfig.bin,
-      model: session.model ?? engineConfig.model,
+      model: currentSession.model ?? engineConfig.model,
       cliFlags: employee?.cliFlags,
-      interactive: session.engine === "claude" && (config.connectors?.web?.bidirectional !== false),
-      sessionId: session.id,
+      interactive: currentSession.engine === "claude" && (config.connectors?.web?.bidirectional !== false),
+      sessionId: currentSession.id,
       onStream: (delta) => {
+        const now = Date.now();
+        if (now - lastHeartbeatAt >= 2000) {
+          lastHeartbeatAt = now;
+          updateSession(currentSession.id, {
+            status: "running",
+            lastActivity: new Date(now).toISOString(),
+          });
+        }
         try {
           context.emit("session:delta", {
-            sessionId: session.id,
+            sessionId: currentSession.id,
             type: delta.type,
             content: delta.content,
             toolName: delta.toolName,
           });
         } catch (err) {
-          logger.warn(`Failed to emit stream delta for session ${session.id}: ${err instanceof Error ? err.message : err}`);
+          logger.warn(`Failed to emit stream delta for session ${currentSession.id}: ${err instanceof Error ? err.message : err}`);
         }
       },
+    }).finally(() => {
+      clearInterval(runHeartbeat);
     });
+
+    if (result.error === RESTARTING_TURN_REASON) {
+      logger.info(`Web session ${currentSession.id} interrupted for immediate restart`);
+      return;
+    }
 
     // Persist the assistant response
     if (result.result) {
-      insertMessage(session.id, "assistant", result.result);
+      insertMessage(currentSession.id, "assistant", result.result);
     }
 
-    updateSession(session.id, {
+    updateSession(currentSession.id, {
       engineSessionId: result.sessionId,
-      status: "idle",
+      status: result.error ? "error" : "idle",
       lastActivity: new Date().toISOString(),
       lastError: result.error ?? null,
     });
 
     context.emit("session:completed", {
-      sessionId: session.id,
-      employee: session.employee || config.portal?.portalName || "Jimmy",
-      title: session.title,
+      sessionId: currentSession.id,
+      employee: currentSession.employee || config.portal?.portalName || "Jimmy",
+      title: currentSession.title,
       result: result.result,
       error: result.error || null,
       cost: result.cost,
@@ -774,22 +776,22 @@ async function runWebSession(
     });
 
     logger.info(
-      `Web session ${session.id} completed` +
+      `Web session ${currentSession.id} completed` +
       (result.durationMs ? ` in ${result.durationMs}ms` : "") +
       (result.cost ? ` ($${result.cost.toFixed(4)})` : ""),
     );
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    updateSession(session.id, {
+    updateSession(currentSession.id, {
       status: "error",
       lastActivity: new Date().toISOString(),
       lastError: errMsg,
     });
     context.emit("session:completed", {
-      sessionId: session.id,
+      sessionId: currentSession.id,
       result: null,
       error: errMsg,
     });
-    logger.error(`Web session ${session.id} error: ${errMsg}`);
+    logger.error(`Web session ${currentSession.id} error: ${errMsg}`);
   }
 }

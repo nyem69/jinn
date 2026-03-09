@@ -54,7 +54,7 @@ function ChatPage() {
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
-  const { events } = useGateway()
+  const { events, connectionSeq } = useGateway()
   const searchParams = useSearchParams()
   const onboardingTriggered = useRef(false)
 
@@ -283,6 +283,18 @@ function ChatPage() {
             timestamp: m.timestamp ? Number(m.timestamp) : Date.now(),
           }))
         : []
+      if (session.status === 'error' && session.lastError) {
+        const lastMessage = backendMessages[backendMessages.length - 1]
+        const errorText = `Error: ${String(session.lastError)}`
+        if (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.content !== errorText) {
+          backendMessages.push({
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: errorText,
+            timestamp: Date.now(),
+          })
+        }
+      }
 
       const isRunning = session.status === 'running'
 
@@ -309,6 +321,27 @@ function ChatPage() {
       intermediateStartRef.current = -1
     }
   }, [])
+
+  useEffect(() => {
+    if (!connectionSeq || !selectedId) return
+    loadSession(selectedId)
+  }, [connectionSeq, selectedId, loadSession])
+
+  useEffect(() => {
+    if (!selectedId || !loading) return
+    const timer = setInterval(async () => {
+      try {
+        const session = (await api.getSession(selectedId)) as Record<string, unknown>
+        if (session.status !== 'running') {
+          await loadSession(selectedId)
+          setLoading(false)
+        }
+      } catch {
+        // ignore transient polling errors while WS reconnects
+      }
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [selectedId, loading, loadSession])
 
   const handleSelect = useCallback(
     (id: string) => {
@@ -485,6 +518,7 @@ function ChatPage() {
             onNewChat={handleNewChat}
             onDelete={handleDeleteSession}
             refreshKey={refreshKey}
+            connectionSeq={connectionSeq}
             onSessionsLoaded={handleSessionsLoaded}
             events={events}
           />
@@ -504,6 +538,7 @@ function ChatPage() {
             onNewChat={handleNewChat}
             onDelete={handleDeleteSession}
             refreshKey={refreshKey}
+            connectionSeq={connectionSeq}
             onSessionsLoaded={handleSessionsLoaded}
             events={events}
           />

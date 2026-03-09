@@ -3,6 +3,7 @@ import { isBidirectionalEngine } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 
 export type QueuedStatus = "queued" | "steered" | "interrupted";
+export const RESTARTING_TURN_REASON = "Interrupted: restarting turn";
 
 export class SessionQueue {
   private queues = new Map<string, Promise<void>>();
@@ -40,6 +41,11 @@ export class SessionQueue {
       },
     );
     this.queues.set(sessionKey, next);
+    void next.finally(() => {
+      if (this.queues.get(sessionKey) === next) {
+        this.queues.delete(sessionKey);
+      }
+    });
     return next;
   }
 
@@ -57,12 +63,12 @@ export class SessionQueue {
     interrupt: boolean,
   ): QueuedStatus {
     if (interrupt && isBidirectionalEngine(engine)) {
-      engine.kill(sessionId);
+      engine.kill(sessionId, RESTARTING_TURN_REASON);
       logger.info(`Interrupted session ${sessionId}`);
       return "interrupted";
     }
 
-    if (isBidirectionalEngine(engine) && engine.isAlive(sessionId)) {
+    if (isBidirectionalEngine(engine) && engine.canSteer(sessionId) && engine.isAlive(sessionId)) {
       engine.steer(sessionId, message);
       return "steered";
     }

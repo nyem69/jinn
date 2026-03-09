@@ -21,6 +21,7 @@ interface ChatSidebarProps {
   onNewChat: () => void
   onDelete?: (id: string) => void
   refreshKey: number
+  connectionSeq?: number
   onSessionsLoaded?: (sessions: Session[]) => void
   events?: Array<{ event: string; payload: unknown }>
 }
@@ -133,6 +134,7 @@ export function ChatSidebar({
   onNewChat,
   onDelete,
   refreshKey,
+  connectionSeq,
   onSessionsLoaded,
   events,
 }: ChatSidebarProps) {
@@ -147,7 +149,7 @@ export function ChatSidebar({
   const [readSessions, setReadSessions] = useState<Set<string>>(new Set())
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [employeeEmojis, setEmployeeEmojis] = useState<Map<string, string>>(new Map())
-  const lastEventCount = useRef(0)
+  const lastEventKey = useRef<string | null>(null)
 
   // Load persisted state from localStorage + fetch employee emojis
   useEffect(() => {
@@ -207,19 +209,24 @@ export function ChatSidebar({
     fetchSessions()
   }, [refreshKey, fetchSessions])
 
+  useEffect(() => {
+    if (!connectionSeq) return
+    fetchSessions()
+  }, [connectionSeq, fetchSessions])
+
   // Task 1: Auto-refresh sidebar on relevant WS events
   useEffect(() => {
     if (!events || events.length === 0) return
-    // Only process new events since last check
-    if (events.length <= lastEventCount.current) return
-    const newEvents = events.slice(lastEventCount.current)
-    lastEventCount.current = events.length
+    const latest = events[events.length - 1]
+    const eventKey = `${latest.event}:${JSON.stringify(latest.payload)}`
+    if (eventKey === lastEventKey.current) return
+    lastEventKey.current = eventKey
 
-    const shouldRefresh = newEvents.some(e =>
-      e.event === 'session:started' ||
-      e.event === 'session:completed' ||
-      e.event === 'session:deleted'
-    )
+    const shouldRefresh =
+      latest.event === 'session:started' ||
+      latest.event === 'session:completed' ||
+      latest.event === 'session:deleted' ||
+      latest.event === 'session:error'
     if (shouldRefresh) {
       fetchSessions()
     }

@@ -203,12 +203,15 @@ export function listSessions(filter?: ListSessionsFilter): Session[] {
 }
 
 /**
- * Mark any sessions stuck in "running" status as "idle".
+ * Mark any sessions stuck in "running" status as "error".
  * Called on gateway startup — if the gateway is starting, no sessions can actually be running.
  */
 export function recoverStaleSessions(): number {
   const db = initDb();
-  const result = db.prepare("UPDATE sessions SET status = 'idle', last_error = 'Recovered: gateway restarted while session was running' WHERE status = 'running'").run();
+  const now = new Date().toISOString();
+  const result = db.prepare(
+    "UPDATE sessions SET status = 'error', last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running'",
+  ).run(now);
   return result.changes;
 }
 

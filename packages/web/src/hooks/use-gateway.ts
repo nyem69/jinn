@@ -29,6 +29,7 @@ export function useGateway() {
   const portalName = settings.portalName ?? "Jimmy";
   const [events, setEvents] = useState<Array<{ event: string; payload: unknown }>>([]);
   const [connected, setConnected] = useState(false);
+  const [connectionSeq, setConnectionSeq] = useState(0);
   const permissionRequested = useRef(false);
   const portalNameRef = useRef(portalName);
   portalNameRef.current = portalName;
@@ -41,7 +42,6 @@ export function useGateway() {
     }
 
     const socket = createGatewaySocket((event, payload) => {
-      setConnected(true);
       setEvents((prev) => [...prev.slice(-99), { event, payload }]);
 
       // Push notification when a session completes
@@ -55,10 +55,17 @@ export function useGateway() {
           showNotification(`${employee} — Done`, "Session completed successfully");
         }
       }
+    }, {
+      onOpen: () => {
+        setConnected(true);
+        setConnectionSeq((prev) => prev + 1);
+      },
+      onClose: () => {
+        setConnected(false);
+      },
     });
-    setConnected(true);
     return () => socket.close();
   }, []);
 
-  return { events, connected };
+  return { events, connected, connectionSeq };
 }

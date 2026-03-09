@@ -6,6 +6,7 @@ import { logger } from "../shared/logger.js";
 export interface BidirectionalTimeouts {
   idleTimeoutMinutes: number;
   hardTimeoutHours: number;
+  turnStallMinutes: number;
 }
 
 /** State for a live bidirectional process */
@@ -37,13 +38,17 @@ interface LiveProcess {
   spawnedAt: number;
   /** When the last turn completed (null if mid-turn) */
   lastTurnCompletedAt: number | null;
+  /** When we last observed progress for the active turn */
+  lastProgressAt: number;
+  /** Why the process was terminated, if we killed it intentionally */
+  terminationReason: string | null;
 }
 
 export class ClaudeEngine implements BidirectionalEngine {
   name = "claude" as const;
   private liveProcesses = new Map<string, LiveProcess>();
   private sweepInterval: ReturnType<typeof setInterval> | null = null;
-  private timeouts: BidirectionalTimeouts = { idleTimeoutMinutes: 60, hardTimeoutHours: 24 };
+  private timeouts: BidirectionalTimeouts = { idleTimeoutMinutes: 60, hardTimeoutHours: 24, turnStallMinutes: 10 };
 
   /**
    * Set timeout configuration and start the sweep loop.
@@ -68,6 +73,7 @@ export class ClaudeEngine implements BidirectionalEngine {
     const now = Date.now();
     const idleMs = this.timeouts.idleTimeoutMinutes * 60 * 1000;
     const hardMs = this.timeouts.hardTimeoutHours * 60 * 60 * 1000;
+    const turnStallMs = this.timeouts.turnStallMinutes * 60 * 1000;
 
     for (const [sessionId, live] of this.liveProcesses) {
       if (live.proc.killed || live.proc.exitCode !== null) continue;
@@ -80,6 +86,17 @@ export class ClaudeEngine implements BidirectionalEngine {
         logger.info(`Hard timeout (${this.timeouts.hardTimeoutHours}h) reached for session ${sessionId}, killing process`);
         this.kill(sessionId);
         continue;
+      }
+
+      if (isMidTurn && turnStallMs > 0) {
+        const stalledFor = now - live.lastProgressAt;
+        if (stalledFor >= turnStallMs) {
+          logger.warn(
+            `Turn stall timeout (${this.timeouts.turnStallMinutes}m) reached for session ${sessionId}, killing process`,
+          );
+          this.kill(sessionId);
+          continue;
+        }
       }
 
       // Idle timeout — only kills when not mid-turn
@@ -120,24 +137,32 @@ export class ClaudeEngine implements BidirectionalEngine {
       parent_tool_use_id: null,
     });
     live.proc.stdin.write(msg + "\n");
+    live.lastProgressAt = Date.now();
     logger.info(`Steered session ${sessionId} with new message`);
   }
 
   /**
    * Kill a running engine process (for interrupt).
    */
-  kill(sessionId: string): void {
+  kill(sessionId: string, reason = "Interrupted"): void {
     const live = this.liveProcesses.get(sessionId);
     if (!live) return;
 
+    live.terminationReason = reason;
     logger.info(`Killing bidirectional process for session ${sessionId}`);
-    live.proc.kill("SIGTERM");
+    this.signalProcess(live.proc, "SIGTERM");
     // Give it a moment, then force kill
     setTimeout(() => {
-      if (!live.proc.killed) {
-        live.proc.kill("SIGKILL");
+      if (live.proc.exitCode === null) {
+        this.signalProcess(live.proc, "SIGKILL");
       }
     }, 2000);
+  }
+
+  killAll(): void {
+    for (const sessionId of this.liveProcesses.keys()) {
+      this.kill(sessionId, "Interrupted: gateway shutting down");
+    }
   }
 
   /**
@@ -146,6 +171,10 @@ export class ClaudeEngine implements BidirectionalEngine {
   isAlive(sessionId: string): boolean {
     const live = this.liveProcesses.get(sessionId);
     return !!live && !live.proc.killed && live.proc.exitCode === null;
+  }
+
+  canSteer(sessionId: string): boolean {
+    return this.isAlive(sessionId);
   }
 
   async run(opts: EngineRunOpts): Promise<EngineResult> {
@@ -185,6 +214,7 @@ export class ClaudeEngine implements BidirectionalEngine {
         cwd: opts.cwd,
         env: cleanEnv,
         stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
       });
 
       let stdout = "";
@@ -316,6 +346,7 @@ export class ClaudeEngine implements BidirectionalEngine {
       cwd: opts.cwd,
       env: cleanEnv,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
 
     live = {
@@ -333,6 +364,8 @@ export class ClaudeEngine implements BidirectionalEngine {
       model: opts.model,
       spawnedAt: Date.now(),
       lastTurnCompletedAt: null,
+      lastProgressAt: Date.now(),
+      terminationReason: null,
     };
     this.liveProcesses.set(sessionId, live);
 
@@ -367,7 +400,7 @@ export class ClaudeEngine implements BidirectionalEngine {
         lp.resolveTurn({
           sessionId: lp.engineSessionId,
           result: lp.resultText || "",
-          error: code !== 0 ? `Claude exited with code ${code}` : undefined,
+          error: lp.terminationReason ?? (code !== 0 ? `Claude exited with code ${code}` : undefined),
         });
         lp.resolveTurn = null;
       }
@@ -414,6 +447,7 @@ export class ClaudeEngine implements BidirectionalEngine {
       parent_tool_use_id: null,
     });
     live.proc.stdin!.write(msg + "\n");
+    live.lastProgressAt = Date.now();
 
     // Create a promise that resolves when the turn completes
     // No per-turn timeout — the sweep loop handles idle/hard timeouts
@@ -431,6 +465,7 @@ export class ClaudeEngine implements BidirectionalEngine {
   private handleBidirectionalLine(sessionId: string, line: string, lineCount: number): void {
     const live = this.liveProcesses.get(sessionId);
     if (!live) return;
+    live.lastProgressAt = Date.now();
 
     // Check for system init message to capture engine session ID
     try {
@@ -567,5 +602,18 @@ export class ClaudeEngine implements BidirectionalEngine {
       if (v !== undefined) cleanEnv[k] = v;
     }
     return cleanEnv;
+  }
+
+  private signalProcess(proc: ChildProcess, signal: NodeJS.Signals): void {
+    if (proc.exitCode !== null) return;
+    try {
+      if (process.platform !== "win32" && proc.pid) {
+        process.kill(-proc.pid, signal);
+      } else {
+        proc.kill(signal);
+      }
+    } catch (err) {
+      logger.debug(`Failed to send ${signal} to Claude process: ${err instanceof Error ? err.message : err}`);
+    }
   }
 }

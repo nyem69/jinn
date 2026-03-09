@@ -84,7 +84,7 @@ export class SessionManager {
     // If session is running and engine supports steering, steer mid-turn
     if (session.status === "running" && this.queue.isRunning(sourceRef)) {
       const engine = this.engines.get(session.engine);
-      if (engine && isBidirectionalEngine(engine) && engine.isAlive(session.id)) {
+      if (engine && isBidirectionalEngine(engine) && engine.canSteer(session.id) && engine.isAlive(session.id)) {
         insertMessage(session.id, "user", msg.text);
         engine.steer(session.id, msg.text);
         await connector.addReaction(target, "zap").catch(() => {});

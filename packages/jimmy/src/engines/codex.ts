@@ -12,6 +12,10 @@ interface LiveProcess {
   spawnedAt: number;
   /** When the last turn completed (null if mid-turn) */
   lastTurnCompletedAt: number | null;
+  /** When we last observed output or process progress */
+  lastProgressAt: number;
+  /** Why the process was terminated, if we killed it intentionally */
+  terminationReason: string | null;
 }
 
 /**
@@ -35,7 +39,7 @@ export class CodexEngine implements BidirectionalEngine {
   name = "codex" as const;
   private liveProcesses = new Map<string, LiveProcess>();
   private sweepInterval: ReturnType<typeof setInterval> | null = null;
-  private timeouts: BidirectionalTimeouts = { idleTimeoutMinutes: 60, hardTimeoutHours: 24 };
+  private timeouts: BidirectionalTimeouts = { idleTimeoutMinutes: 60, hardTimeoutHours: 24, turnStallMinutes: 10 };
 
   /**
    * Set timeout configuration and start the sweep loop.
@@ -61,6 +65,7 @@ export class CodexEngine implements BidirectionalEngine {
   private sweep(): void {
     const now = Date.now();
     const hardMs = this.timeouts.hardTimeoutHours * 60 * 60 * 1000;
+    const turnStallMs = this.timeouts.turnStallMinutes * 60 * 1000;
 
     for (const [sessionId, live] of this.liveProcesses) {
       if (live.proc.killed || live.proc.exitCode !== null) {
@@ -75,6 +80,15 @@ export class CodexEngine implements BidirectionalEngine {
       if (hardMs > 0 && age >= hardMs) {
         logger.info(`Hard timeout (${this.timeouts.hardTimeoutHours}h) reached for Codex session ${sessionId}, killing process`);
         this.kill(sessionId);
+        continue;
+      }
+
+      if (turnStallMs > 0) {
+        const stalledFor = now - live.lastProgressAt;
+        if (stalledFor >= turnStallMs) {
+          logger.warn(`Turn stall timeout (${this.timeouts.turnStallMinutes}m) reached for Codex session ${sessionId}, killing process`);
+          this.kill(sessionId);
+        }
       }
     }
   }
@@ -101,18 +115,25 @@ export class CodexEngine implements BidirectionalEngine {
   /**
    * Kill a running engine process (for interrupt).
    */
-  kill(sessionId: string): void {
+  kill(sessionId: string, reason = "Interrupted"): void {
     const live = this.liveProcesses.get(sessionId);
     if (!live) return;
 
+    live.terminationReason = reason;
     logger.info(`Killing Codex process for session ${sessionId}`);
-    live.proc.kill("SIGTERM");
+    this.signalProcess(live.proc, "SIGTERM");
     // Give it a moment, then force kill
     setTimeout(() => {
-      if (!live.proc.killed) {
-        live.proc.kill("SIGKILL");
+      if (live.proc.exitCode === null) {
+        this.signalProcess(live.proc, "SIGKILL");
       }
     }, 2000);
+  }
+
+  killAll(): void {
+    for (const sessionId of this.liveProcesses.keys()) {
+      this.kill(sessionId, "Interrupted: gateway shutting down");
+    }
   }
 
   /**
@@ -121,6 +142,10 @@ export class CodexEngine implements BidirectionalEngine {
   isAlive(sessionId: string): boolean {
     const live = this.liveProcesses.get(sessionId);
     return !!live && !live.proc.killed && live.proc.exitCode === null;
+  }
+
+  canSteer(_sessionId: string): boolean {
+    return false;
   }
 
   async run(opts: EngineRunOpts): Promise<EngineResult> {
@@ -173,6 +198,7 @@ export class CodexEngine implements BidirectionalEngine {
         cwd: opts.cwd,
         env: cleanEnv,
         stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32",
       });
 
       // Track the live process for kill/isAlive
@@ -182,6 +208,8 @@ export class CodexEngine implements BidirectionalEngine {
         engineSessionId: opts.resumeSessionId || "",
         spawnedAt: Date.now(),
         lastTurnCompletedAt: null,
+        lastProgressAt: Date.now(),
+        terminationReason: null,
       };
       this.liveProcesses.set(sessionId, live);
 
@@ -204,6 +232,7 @@ export class CodexEngine implements BidirectionalEngine {
 
       proc.stdout!.on("data", (d: Buffer) => {
         const chunk = d.toString();
+        live.lastProgressAt = Date.now();
         lineBuf += chunk;
         const lines = lineBuf.split("\n");
         lineBuf = lines.pop() || "";
@@ -246,6 +275,7 @@ export class CodexEngine implements BidirectionalEngine {
 
       proc.stderr!.on("data", (d: Buffer) => {
         const chunk = d.toString();
+        live.lastProgressAt = Date.now();
         stderr += chunk;
         for (const line of chunk.trim().split("\n").filter(Boolean)) {
           logger.debug(`[codex stderr] ${line}`);
@@ -258,6 +288,7 @@ export class CodexEngine implements BidirectionalEngine {
       proc.on("close", (code) => {
         if (settled) return;
         settled = true;
+        const terminatedReason = live.terminationReason;
 
         // Process any remaining data in line buffer
         if (lineBuf.trim()) {
@@ -295,11 +326,11 @@ export class CodexEngine implements BidirectionalEngine {
           resolve({
             sessionId: threadId || opts.resumeSessionId || "",
             result: resultText,
-            error: turnError ?? undefined,
+            error: terminatedReason ?? turnError ?? undefined,
             numTurns: numTurns || undefined,
           });
         } else {
-          const errMsg = turnError || `Codex exited with code ${code}: ${stderr.slice(0, 500)}`;
+          const errMsg = terminatedReason || turnError || `Codex exited with code ${code}: ${stderr.slice(0, 500)}`;
           logger.error(errMsg);
           resolve({
             sessionId: threadId || opts.resumeSessionId || "",
@@ -507,5 +538,18 @@ export class CodexEngine implements BidirectionalEngine {
       if (v !== undefined) cleanEnv[k] = v;
     }
     return cleanEnv;
+  }
+
+  private signalProcess(proc: ChildProcess, signal: NodeJS.Signals): void {
+    if (proc.exitCode !== null) return;
+    try {
+      if (process.platform !== "win32" && proc.pid) {
+        process.kill(-proc.pid, signal);
+      } else {
+        proc.kill(signal);
+      }
+    } catch (err) {
+      logger.debug(`Failed to send ${signal} to Codex process: ${err instanceof Error ? err.message : err}`);
+    }
   }
 }
