@@ -1,9 +1,6 @@
 "use client"
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { api } from '@/lib/api'
-// Audio recorder imports preserved for future STT integration
-// import { createAudioRecorder, formatDuration } from '@/lib/audio-recorder'
-// import type { AudioRecorderHandle } from '@/lib/audio-recorder'
 import type { MediaAttachment } from '@/lib/conversations'
 import { MediaPreview } from './media-preview'
 
@@ -114,9 +111,11 @@ export function ChatInput({
   const [commandFilter, setCommandFilter] = useState('')
   const [commandIndex, setCommandIndex] = useState(0)
   const [pendingAttachments, setPendingAttachments] = useState<MediaAttachment[]>([])
+  const [isListening, setIsListening] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mentionItemRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
+  const recognitionRef = useRef<SpeechRecognition | null>(null)
 
   // Load employees for @mention (with full details)
   useEffect(() => {
@@ -338,6 +337,54 @@ export function ChatInput({
         return
       }
     }
+  }
+
+  /* ── Speech-to-text (Web Speech API) ──────────────────── */
+
+  const hasSpeechSupport = typeof window !== 'undefined' &&
+    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)
+
+  function toggleSpeechRecognition() {
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop()
+      return
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) return
+
+    const recognition = new SpeechRecognition()
+    recognition.lang = 'en-US'
+    recognition.continuous = false
+    recognition.interimResults = false
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const transcript = event.results[0]?.[0]?.transcript
+      if (transcript) {
+        setValue((prev) => prev ? prev + ' ' + transcript : transcript)
+        // Auto-resize textarea after filling
+        setTimeout(() => {
+          if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto'
+            textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px'
+          }
+        }, 0)
+      }
+    }
+
+    recognition.onend = () => {
+      setIsListening(false)
+      recognitionRef.current = null
+    }
+
+    recognition.onerror = () => {
+      setIsListening(false)
+      recognitionRef.current = null
+    }
+
+    recognitionRef.current = recognition
+    recognition.start()
+    setIsListening(true)
   }
 
   const filteredCommands = slashCommands.filter((c) =>
@@ -567,35 +614,35 @@ export function ChatInput({
           }}
         />
 
-        {/* Voice input button (STT coming soon) */}
-        <button
-          aria-label="Voice input — coming soon"
-          onClick={() => {
-            // STT will be wired up in a follow-up
-          }}
-          style={{
-            width: 32,
-            height: 32,
-            flexShrink: 0,
-            borderRadius: 'var(--radius-sm)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'transparent',
-            border: 'none',
-            cursor: 'default',
-            color: 'var(--text-quaternary)',
-            opacity: 0.5,
-          }}
-          title="Voice input — coming soon"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-            <line x1="12" y1="19" x2="12" y2="23" />
-            <line x1="8" y1="23" x2="16" y2="23" />
-          </svg>
-        </button>
+        {/* Voice input button (Web Speech API) */}
+        {hasSpeechSupport && (
+          <button
+            aria-label={isListening ? 'Stop listening' : 'Voice input'}
+            onClick={toggleSpeechRecognition}
+            style={{
+              width: 32,
+              height: 32,
+              flexShrink: 0,
+              borderRadius: 'var(--radius-sm)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: isListening ? 'var(--system-red)' : 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              color: isListening ? '#fff' : 'var(--text-secondary)',
+              transition: 'all 150ms ease',
+            }}
+            title={isListening ? 'Stop listening' : 'Voice input'}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+          </button>
+        )}
 
         {/* Stop button — shown when loading */}
         {loading && onInterrupt && (
