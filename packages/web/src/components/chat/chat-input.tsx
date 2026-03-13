@@ -749,6 +749,35 @@ export function ChatInput({
         <span>@name - mention</span>
       </div>
 
+      {/* STT error banner */}
+      {stt.state === 'error' && stt.error && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--space-2)',
+          marginTop: 'var(--space-2)',
+          padding: 'var(--space-2) var(--space-3)',
+          background: 'color-mix(in srgb, var(--system-red) 12%, transparent)',
+          borderRadius: 'var(--radius-sm)',
+          fontSize: 'var(--text-caption1)',
+          color: 'var(--system-red)',
+        }}>
+          <span style={{ flex: 1 }}>Voice input error: {stt.error}</span>
+          <button
+            onClick={stt.dismissError}
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--system-red)',
+              fontSize: 'var(--text-caption1)',
+              fontWeight: 600,
+              padding: '2px 6px',
+            }}
+          >Dismiss</button>
+        </div>
+      )}
+
       {/* STT model download modal */}
       <SttDownloadModal
         open={stt.state === 'no-model'}

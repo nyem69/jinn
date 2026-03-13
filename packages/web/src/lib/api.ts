@@ -96,13 +96,25 @@ export const api = {
     post<{ status: string; model: string }>("/api/stt/download", {}),
   sttTranscribe: async (audioBlob: Blob, language?: string): Promise<{ text: string }> => {
     const params = language ? `?language=${encodeURIComponent(language)}` : "";
-    const res = await fetch(`${BASE}/api/stt/transcribe${params}`, {
-      method: "POST",
-      headers: { "Content-Type": audioBlob.type || "audio/webm" },
-      body: audioBlob,
-    });
-    if (!res.ok) throw new Error(`API error: ${res.status}`);
-    return res.json();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5 * 60_000); // 5 min timeout
+    try {
+      const res = await fetch(`${BASE}/api/stt/transcribe${params}`, {
+        method: "POST",
+        headers: { "Content-Type": audioBlob.type || "audio/webm" },
+        body: audioBlob,
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      return res.json();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw new Error("Transcription timed out (5 min)");
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
   },
   sttUpdateConfig: (languages: string[]) =>
     put<{ status: string; languages: string[] }>("/api/stt/config", { languages }),

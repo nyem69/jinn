@@ -180,7 +180,9 @@ async function convertToWav(inputPath: string): Promise<string> {
     "-c:a", "pcm_s16le", // 16-bit PCM
     "-y",              // overwrite
     wavPath,
-  ]);
+  ], {
+    timeout: 2 * 60 * 1000, // 2 min timeout
+  });
   return wavPath;
 }
 
@@ -209,7 +211,7 @@ export async function transcribe(
       "-f", wavPath,
     ], {
       maxBuffer: 10 * 1024 * 1024,
-      timeout: 5 * 60 * 1000, // 5 min timeout for long recordings
+      timeout: 15 * 60 * 1000, // 15 min timeout for long recordings
     });
 
     // Clean up whisper output: remove blank lines, trim whitespace

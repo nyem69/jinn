@@ -879,7 +879,7 @@ export async function handleApiRequest(
 
       const audioBuffer = await readBodyRaw(req);
       if (audioBuffer.length === 0) return badRequest(res, "No audio data");
-      if (audioBuffer.length > 10 * 1024 * 1024) return badRequest(res, "Audio too large (10MB max)");
+      if (audioBuffer.length > 100 * 1024 * 1024) return badRequest(res, "Audio too large (100MB max)");
 
       const contentType = req.headers["content-type"] || "audio/webm";
       const ext = contentType.includes("wav") ? ".wav"

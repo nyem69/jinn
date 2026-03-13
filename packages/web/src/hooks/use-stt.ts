@@ -7,6 +7,7 @@ export type SttState =
   | "no-model"       // model not downloaded, need to show download modal
   | "recording"      // actively recording
   | "transcribing"   // audio sent, waiting for result
+  | "error"          // transcription failed
 
 export interface UseSttReturn {
   state: SttState
@@ -17,6 +18,8 @@ export interface UseSttReturn {
   languages: string[]
   /** Currently selected language for transcription */
   selectedLanguage: string
+  /** Error message when state is "error" */
+  error: string | null
   /** Cycle to the next language */
   cycleLanguage: () => void
   handleMicClick: () => void
@@ -25,9 +28,10 @@ export interface UseSttReturn {
   cancelRecording: () => void
   startDownload: () => void
   dismissDownload: () => void
+  dismissError: () => void
 }
 
-const MAX_RECORDING_MS = 5 * 60_000 // 5 minutes max
+const MAX_RECORDING_MS = 30 * 60_000 // 30 minutes max
 
 export function useStt(
   wsEvents?: Array<{ event: string; payload: unknown }>,
@@ -38,6 +42,7 @@ export function useStt(
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null)
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null)
   const [languages, setLanguages] = useState<string[]>(["en"])
+  const [error, setError] = useState<string | null>(null)
   const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
     if (typeof window === "undefined") return "en"
     return localStorage.getItem("stt-language") || "en"
@@ -172,6 +177,7 @@ export function useStt(
           const result = await api.sttTranscribe(blob, selectedLanguageRef.current)
           const text = result.text || null
           setState("idle")
+          setError(null)
           if (stopResolveRef.current) {
             stopResolveRef.current(text)
             stopResolveRef.current = null
@@ -179,8 +185,10 @@ export function useStt(
             // Timeout-triggered stop — no stopRecording() was called
             onAutoTranscriptRef.current(text)
           }
-        } catch {
-          setState("idle")
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Transcription failed"
+          setError(msg)
+          setState("error")
           if (stopResolveRef.current) {
             stopResolveRef.current(null)
             stopResolveRef.current = null
@@ -188,7 +196,7 @@ export function useStt(
         }
       }
 
-      recorder.start(100)
+      recorder.start(5000)
       setState("recording")
 
       // Auto-stop after max duration (will trigger onstop → transcription)
@@ -205,6 +213,7 @@ export function useStt(
 
   const handleMicClick = useCallback(async () => {
     if (state === "recording" || state === "transcribing") return
+    if (state === "error") { setError(null); setState("idle") }
 
     const isAvailable = await checkStatus()
     if (isAvailable) {
@@ -270,6 +279,11 @@ export function useStt(
     setDownloadProgress(null)
   }, [])
 
+  const dismissError = useCallback(() => {
+    setState("idle")
+    setError(null)
+  }, [])
+
   const cycleLanguage = useCallback(() => {
     setSelectedLanguage((prev) => {
       const idx = languages.indexOf(prev)
@@ -286,6 +300,7 @@ export function useStt(
     analyser,
     languages,
     selectedLanguage,
+    error,
     cycleLanguage,
     handleMicClick,
     startRecording,
@@ -293,5 +308,6 @@ export function useStt(
     cancelRecording,
     startDownload,
     dismissDownload,
+    dismissError,
   }
 }
