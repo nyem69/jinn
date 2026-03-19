@@ -332,40 +332,7 @@ export function ChatSidebar({
     }
   }, [selectedId])
 
-  useEffect(() => {
-    const employeeNames = Array.from(
-      new Set(
-        sessions
-          .map((session) => session.employee)
-          .filter((employee): employee is string => Boolean(employee && employee !== portalSlug))
-      )
-    )
-
-    if (employeeNames.length === 0) return
-
-    let cancelled = false
-    Promise.all(
-      employeeNames.map(async (name) => {
-        try {
-          const employee = await api.getEmployee(name)
-          return [name, employee as Employee] as const
-        } catch {
-          return null
-        }
-      })
-    ).then((results) => {
-      if (cancelled) return
-      const next = new Map<string, Employee>()
-      for (const entry of results) {
-        if (entry) next.set(entry[0], entry[1])
-      }
-      setEmployeeData(next)
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [sessions, portalSlug])
+  // Employee detail endpoint doesn't exist on current gateway — skip fetching
 
   const toggleCronCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -412,6 +379,7 @@ export function ChatSidebar({
   }, [])
 
   async function handleDeleteEmployee(empName: string, empSessions: Session[]) {
+    setConfirmDeleteEmployee(null)
     const ids = empSessions.map((s) => s.id)
     try {
       await bulkDeleteMutation.mutateAsync(ids)
@@ -422,12 +390,14 @@ export function ChatSidebar({
         savePinnedSessions(next)
         return next
       })
-      if (selectedId && ids.includes(selectedId)) onNewChat()
+      queueMicrotask(() => {
+        if (selectedId && ids.includes(selectedId)) onNewChat()
+      })
     } catch {}
-    setConfirmDeleteEmployee(null)
   }
 
   async function handleDelete(sessionId: string) {
+    setConfirmDelete(null)
     try {
       await deleteSessionMutation.mutateAsync(sessionId)
       setPinnedSessions((prev) => {
@@ -437,10 +407,12 @@ export function ChatSidebar({
         savePinnedSessions(next)
         return next
       })
-      if (onDelete) onDelete(sessionId)
-      else if (selectedId === sessionId) onNewChat()
+      // Defer parent callback to avoid updating parent state during sidebar render
+      queueMicrotask(() => {
+        if (onDelete) onDelete(sessionId)
+        else if (selectedId === sessionId) onNewChat()
+      })
     } catch {}
-    setConfirmDelete(null)
   }
 
   const displayed = search.trim()
