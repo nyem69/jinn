@@ -295,6 +295,7 @@ export interface PortalConfig {
   portalName?: string;
   operatorName?: string;
   language?: string;
+  onboarded?: boolean;
 }
 
 export interface JinnConfig {
