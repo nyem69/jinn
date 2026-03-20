@@ -352,6 +352,12 @@ export async function handleApiRequest(
         }
       }
 
+      // Support ?last=N to return only the N most recent messages
+      const lastN = parseInt(url.searchParams.get("last") || "0", 10);
+      if (lastN > 0 && messages.length > lastN) {
+        messages = messages.slice(-lastN);
+      }
+
       return json(res, { ...serializeSession(session, context), messages });
     }
 
