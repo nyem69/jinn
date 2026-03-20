@@ -94,7 +94,7 @@ describe("notifyParentSession", () => {
 
     const body = JSON.parse(opts.body);
     expect(body.message).toContain("replied in session");
-    expect(body.message).toContain("GET /api/sessions/child-001?last=5");
+    expect(body.message).toContain("GET /api/sessions/child-001?last=N");
     expect(body.message).not.toContain("completed their task");
   });
 

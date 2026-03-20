@@ -70,7 +70,7 @@ async function _sendNotification(
   } else {
     const raw = result.result || "(no output)";
     const preview = raw.length > 200 ? raw.substring(0, 200) + "..." : raw;
-    message = `📩 Employee "${employeeName}" replied in session ${childId}.\nRead the latest messages: GET /api/sessions/${childId}?last=5\n\nPreview: ${preview}`;
+    message = `📩 Employee "${employeeName}" replied in session ${childId}.\nRead the latest messages: GET /api/sessions/${childId}?last=N\n\nPreview: ${preview}`;
   }
 
   await _sendRaw(childSession.parentSessionId!, message);
