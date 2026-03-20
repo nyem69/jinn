@@ -82,7 +82,7 @@ export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) 
 
   const TOTAL_STEPS = 4
 
-  // First-run detection
+  // First-run detection — check server-side flag, not just localStorage
   useEffect(() => {
     if (forceOpen) {
       setLocalName(settings.portalName ?? "")
@@ -90,12 +90,23 @@ export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) 
       setVisible(true)
       return
     }
-    if (
-      typeof window !== "undefined" &&
-      !localStorage.getItem("jinn-onboarded")
-    ) {
-      setVisible(true)
+    // If localStorage says onboarded, trust it (fast path)
+    if (typeof window !== "undefined" && localStorage.getItem("jinn-onboarded")) {
+      return
     }
+    // Otherwise check server — the onboarded flag persists across browsers
+    api.getOnboarding().then((data) => {
+      if (data.onboarded) {
+        localStorage.setItem("jinn-onboarded", "true")
+      } else if (data.needed) {
+        setVisible(true)
+      }
+    }).catch(() => {
+      // Fallback: show wizard if we can't reach the server and no localStorage flag
+      if (!localStorage.getItem("jinn-onboarded")) {
+        setVisible(true)
+      }
+    })
   }, [forceOpen]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleNext = useCallback(() => {

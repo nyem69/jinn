@@ -1265,8 +1265,10 @@ export async function handleApiRequest(
           (f) => String(f).endsWith(".yaml") && !String(f).endsWith("department.yaml")
         );
       const config = context.getConfig();
+      const onboarded = config.portal?.onboarded === true;
       return json(res, {
-        needed: sessions.length === 0 && !hasEmployees,
+        needed: !onboarded && sessions.length === 0 && !hasEmployees,
+        onboarded,
         sessionsCount: sessions.length,
         hasEmployees,
         portalName: config.portal?.portalName ?? null,
@@ -1288,6 +1290,7 @@ export async function handleApiRequest(
         ...config,
         portal: {
           ...config.portal,
+          onboarded: true,
           ...(portalName !== undefined && { portalName: portalName || undefined }),
           ...(operatorName !== undefined && { operatorName: operatorName || undefined }),
           ...(language !== undefined && { language: language || undefined }),
