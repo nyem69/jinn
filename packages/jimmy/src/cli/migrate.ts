@@ -167,8 +167,9 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
       `Clean up the migrations/ directory when done.`,
     ].join("\n");
 
-    execFileSync(engineConfig.bin, ["-p", prompt, "--cwd", JINN_HOME], {
+    execFileSync(engineConfig.bin, ["-p", prompt], {
       stdio: "inherit",
+      cwd: JINN_HOME,
     });
 
     console.log(`\n${GREEN}Migration complete.${RESET}\n`);
