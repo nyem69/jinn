@@ -415,7 +415,7 @@ export function ChatPane({
         ])
       }
     },
-    [sessionId, isStubSession, getOnboardingPrompt, onStubCleared, onSessionCreated, onRefresh]
+    [sessionId, selectedEmployee, isStubSession, getOnboardingPrompt, onStubCleared, onSessionCreated, onRefresh]
   )
 
   const handleStatusRequest = useCallback(async () => {
