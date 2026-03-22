@@ -8,7 +8,6 @@ import { ChatSidebar, type SidebarOrder } from '@/components/chat/chat-sidebar'
 import { ChatTabBar } from '@/components/chat/chat-tabs'
 import { ChatPane } from '@/components/chat/chat-pane'
 import { ShortcutOverlay } from '@/components/chat/shortcut-overlay'
-import { ShortcutHint } from '@/components/chat/shortcut-hint'
 import { useChatTabs } from '@/hooks/use-chat-tabs'
 import { useKeyboardShortcuts, type ShortcutDef } from '@/hooks/use-keyboard-shortcuts'
 import { useDeleteSession } from '@/hooks/use-sessions'
@@ -329,8 +328,8 @@ function ChatPage() {
       if (showShortcutOverlay) setShowShortcutOverlay(false)
       else if (showMoreMenu) setShowMoreMenu(false)
     }},
-    { key: '/', category: 'Actions', description: 'Search', action: () => {
-      const el = document.getElementById('chat-search')
+    { key: '/', category: 'Actions', description: 'Focus chat', action: () => {
+      const el = document.getElementById('chat-textarea')
       if (el) el.focus()
     }},
     { key: '?', category: 'Help', description: 'Keyboard shortcuts', action: () => setShowShortcutOverlay(v => !v) },
@@ -522,14 +521,11 @@ function ChatPage() {
               isStubSession={stubSessionRef.current}
               onStubCleared={handleStubCleared}
               focusTrigger={focusTrigger}
+              onShortcutsClick={() => setShowShortcutOverlay(true)}
             />
           </div>
         </div>
       </div>
-
-      {!showShortcutOverlay && (
-        <ShortcutHint onClick={() => setShowShortcutOverlay(true)} />
-      )}
 
       {showShortcutOverlay && (
         <ShortcutOverlay

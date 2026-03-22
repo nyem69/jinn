@@ -46,6 +46,8 @@ interface ChatInputProps {
   onDroppedFilesConsumed?: () => void
   /** Incrementing counter that triggers textarea focus when changed */
   focusTrigger?: number
+  /** Callback to open keyboard shortcuts overlay */
+  onShortcutsClick?: () => void
 }
 
 /* ── File to MediaAttachment ─────────────────────────────── */
@@ -117,6 +119,7 @@ export function ChatInput({
   droppedFiles,
   onDroppedFilesConsumed,
   focusTrigger,
+  onShortcutsClick,
 }: ChatInputProps) {
   const [value, setValue] = useState('')
   const [employees, setEmployees] = useState<Employee[]>([])
@@ -515,6 +518,7 @@ export function ChatInput({
 
         {/* Textarea */}
         <textarea
+          id="chat-textarea"
           ref={textareaRef}
           value={value}
           onChange={handleChange}
@@ -614,6 +618,15 @@ export function ChatInput({
         <span>Enter to send</span>
         <span>/ - commands</span>
         <span>@name - mention</span>
+        {onShortcutsClick && (
+          <button
+            onClick={onShortcutsClick}
+            className="flex items-center gap-1 text-[length:var(--text-caption2)] text-[var(--text-quaternary)] hover:text-[var(--text-tertiary)] transition-colors bg-transparent border-none cursor-pointer p-0 font-[inherit]"
+          >
+            <kbd className="rounded bg-[var(--fill-tertiary)] px-1 py-0.5 font-mono text-[10px] leading-none">?</kbd>
+            <span>shortcuts</span>
+          </button>
+        )}
       </div>
 
       {/* STT error banner */}

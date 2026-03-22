@@ -44,6 +44,8 @@ interface ChatPaneProps {
   onStubCleared?: () => void
   /** Incrementing counter that triggers input focus */
   focusTrigger?: number
+  /** Callback to open keyboard shortcuts overlay */
+  onShortcutsClick?: () => void
 }
 
 export function ChatPane({
@@ -63,6 +65,7 @@ export function ChatPane({
   isStubSession,
   onStubCleared,
   focusTrigger,
+  onShortcutsClick,
 }: ChatPaneProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
@@ -323,6 +326,10 @@ export function ChatPane({
       setSelectedEmployee(null)
       return
     }
+    // Clear streaming state immediately to avoid stale content flash
+    streamingTextRef.current = ''
+    setStreamingText('')
+    setLoading(false)
     loadSession(sessionId)
   }, [sessionId, loadSession])
 
@@ -618,6 +625,7 @@ export function ChatPane({
           droppedFiles={droppedFiles}
           onDroppedFilesConsumed={() => setDroppedFiles(undefined)}
           focusTrigger={focusTrigger}
+          onShortcutsClick={onShortcutsClick}
         />
       )}
     </div>
