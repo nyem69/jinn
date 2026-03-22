@@ -2,6 +2,12 @@
 
 Thanks for your interest in contributing. This guide covers the basics.
 
+## Prerequisites
+
+- Node.js 22 or later
+- pnpm 10+
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`npm install -g @anthropic-ai/claude-code`)
+
 ## Development Setup
 
 1. Fork and clone the repository.
@@ -9,14 +15,18 @@ Thanks for your interest in contributing. This guide covers the basics.
    ```bash
    pnpm install
    ```
-3. Build all packages:
+3. Initialize Jinn (one-time — builds all packages and creates `~/.jinn`):
    ```bash
-   pnpm build
+   pnpm setup
    ```
+   This is safe to re-run; it skips files that already exist.
 4. Start development mode:
    ```bash
    pnpm dev
    ```
+   This starts the gateway on `:7777` (auto-restarts on source changes) and the
+   Next.js dev server on `:3000` (hot reload). Both must be running for the
+   web dashboard to work.
 
 ## Submitting Pull Requests
 

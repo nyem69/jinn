@@ -149,19 +149,32 @@ jinn/
 git clone https://github.com/hristo2612/jinn.git
 cd jinn
 pnpm install
-pnpm build
-pnpm dev
+pnpm setup   # one-time: builds all packages and creates ~/.jinn
+pnpm dev     # starts gateway (:7777) + Next.js dev server (:3000) with hot reload
 ```
+
+`pnpm dev` starts two servers: the **gateway daemon** on `:7777` (API, WebSocket,
+connectors) and the **Next.js dev server** on `:3000` (web dashboard with hot
+reload). The gateway auto-restarts when you edit TypeScript source files via
+Node's built-in `--watch` mode. Both servers must be running for the dashboard
+to work.
+
+> **Prerequisites:** Node.js 22+, pnpm 10+, and the
+> [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`npm install -g @anthropic-ai/claude-code`).
 
 ### Available Scripts
 
-| Command          | Description                     |
-| ---------------- | ------------------------------- |
-| `pnpm build`     | Build all packages              |
-| `pnpm dev`       | Start development mode          |
-| `pnpm typecheck` | Run TypeScript type checking    |
-| `pnpm lint`      | Lint all packages               |
-| `pnpm clean`     | Clean build artifacts           |
+| Command            | Description                                                         |
+| ------------------ | ------------------------------------------------------------------- |
+| `pnpm setup`       | Build all packages and initialize `~/.jinn` (one-time)              |
+| `pnpm dev`         | Start gateway (`:7777`) + Next.js dev server (`:3000`) with hot reload |
+| `pnpm start`       | Production-style clean build + start gateway on `:7777`             |
+| `pnpm stop`        | Stop the running gateway daemon                                     |
+| `pnpm status`      | Check if the gateway daemon is running                              |
+| `pnpm build`       | Build all packages                                                  |
+| `pnpm typecheck`   | Run TypeScript type checking                                        |
+| `pnpm lint`        | Lint all packages                                                   |
+| `pnpm clean`       | Clean build artifacts                                               |
 
 ## 🗺️ Roadmap
 
