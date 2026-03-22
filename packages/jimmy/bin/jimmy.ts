@@ -2,12 +2,13 @@
 import { Command } from "commander";
 import path from "node:path";
 import os from "node:os";
+import pkg from "../package.json" with { type: "json" };
 
 const program = new Command();
 program
   .name("jinn")
   .description("Lightweight AI gateway daemon")
-  .version("0.3.0")
+  .version(pkg.version)
   .option("-i, --instance <name>", "Target a specific instance (default: jinn)");
 
 // Pre-parse to set JINN_HOME before any module imports resolve paths
