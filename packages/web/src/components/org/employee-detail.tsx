@@ -176,6 +176,47 @@ export function EmployeeDetail({ name, prefetched }: { name: string; prefetched?
           </div>
         </div>
 
+        {/* Notification toggle */}
+        <div className="mt-[var(--space-4)] pt-[var(--space-4)] border-t border-[var(--separator)] flex items-center justify-between">
+          <div>
+            <p className="text-[length:var(--text-caption2)] font-[var(--weight-semibold)] uppercase tracking-[var(--tracking-wide)] text-[var(--text-tertiary)] mb-[var(--space-1)]">
+              Notify on completion
+            </p>
+            <p className="text-[length:var(--text-caption2)] text-[var(--text-tertiary)] m-0">
+              Notify parent session when this employee finishes
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={employee.alwaysNotify !== false}
+            onClick={async () => {
+              const newValue = employee.alwaysNotify === false;
+              setEmployee({ ...employee, alwaysNotify: newValue });
+              try {
+                await api.updateEmployee(employee.name, { alwaysNotify: newValue });
+              } catch {
+                setEmployee({ ...employee, alwaysNotify: !newValue });
+              }
+            }}
+            className="relative inline-flex h-[24px] w-[44px] shrink-0 cursor-pointer rounded-full border-none transition-colors duration-200 ease-in-out focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+            style={{
+              background: employee.alwaysNotify !== false
+                ? "var(--accent, var(--system-green))"
+                : "var(--fill-tertiary)",
+            }}
+          >
+            <span
+              className="pointer-events-none inline-block h-[20px] w-[20px] rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out"
+              style={{
+                transform: employee.alwaysNotify !== false
+                  ? "translate(22px, 2px)"
+                  : "translate(2px, 2px)",
+              }}
+            />
+          </button>
+        </div>
+
         {persona && (
           <div className="mt-[var(--space-4)] pt-[var(--space-4)] border-t border-[var(--separator)]">
             <p className="text-[length:var(--text-caption2)] font-[var(--weight-semibold)] uppercase tracking-[var(--tracking-wide)] text-[var(--text-tertiary)] mb-[var(--space-2)]">

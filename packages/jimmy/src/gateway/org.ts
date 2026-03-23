@@ -37,6 +37,7 @@ export function scanOrg(): Map<string, Employee> {
               emoji: typeof data.emoji === "string" ? data.emoji : undefined,
               cliFlags: Array.isArray(data.cliFlags) ? data.cliFlags : undefined,
               effortLevel: typeof data.effortLevel === "string" ? data.effortLevel : undefined,
+              alwaysNotify: typeof data.alwaysNotify === "boolean" ? data.alwaysNotify : true,
             };
             registry.set(employee.name, employee);
           }
@@ -49,6 +50,67 @@ export function scanOrg(): Map<string, Employee> {
 
   scan(ORG_DIR);
   return registry;
+}
+
+/**
+ * Find the YAML file for an employee by name.
+ * Searches ORG_DIR recursively.
+ */
+function findEmployeeYamlPath(name: string): string | undefined {
+  if (!fs.existsSync(ORG_DIR)) return undefined;
+
+  function search(dir: string): string | undefined {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const found = search(fullPath);
+        if (found) return found;
+      } else if (
+        (entry.name.endsWith(".yaml") || entry.name.endsWith(".yml")) &&
+        entry.name !== "department.yaml"
+      ) {
+        try {
+          const raw = fs.readFileSync(fullPath, "utf-8");
+          const data = yaml.load(raw) as any;
+          if (data?.name === name) return fullPath;
+        } catch {
+          // skip unreadable files
+        }
+      }
+    }
+    return undefined;
+  }
+
+  return search(ORG_DIR);
+}
+
+/**
+ * Update an employee's YAML file. Only alwaysNotify can be changed.
+ * Returns true on success, false if employee not found.
+ */
+export function updateEmployeeYaml(
+  name: string,
+  updates: { alwaysNotify?: boolean },
+): boolean {
+  const filePath = findEmployeeYamlPath(name);
+  if (!filePath) return false;
+
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const data = yaml.load(raw) as Record<string, unknown>;
+    if (!data || typeof data !== "object") return false;
+
+    if (typeof updates.alwaysNotify === "boolean") {
+      data.alwaysNotify = updates.alwaysNotify;
+    }
+
+    fs.writeFileSync(filePath, yaml.dump(data, { lineWidth: -1 }), "utf-8");
+    return true;
+  } catch (err) {
+    logger.warn(`Failed to update employee YAML for ${name}: ${err}`);
+    return false;
+  }
 }
 
 export function findEmployee(

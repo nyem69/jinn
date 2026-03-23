@@ -152,7 +152,7 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
   console.log(`\nLaunching AI to apply ${pending.length} migration(s)...\n`);
 
   const config = loadConfig();
-  const engineConfig = config.engines[config.engines.default];
+  const engineConfig = config.engines[config.engines.default] ?? config.engines.claude;
 
   try {
     const prompt = [
@@ -167,8 +167,9 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
       `Clean up the migrations/ directory when done.`,
     ].join("\n");
 
-    execFileSync(engineConfig.bin, ["-p", prompt, "--cwd", JINN_HOME], {
+    execFileSync(engineConfig.bin, ["-p", prompt], {
       stdio: "inherit",
+      cwd: JINN_HOME,
     });
 
     console.log(`\n${GREEN}Migration complete.${RESET}\n`);

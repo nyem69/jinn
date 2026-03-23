@@ -326,6 +326,7 @@ export async function handleApiRequest(
           default: config.engines.default,
           claude: { model: config.engines.claude.model, available: true },
           codex: { model: config.engines.codex.model, available: true },
+          ...(config.engines.gemini ? { gemini: { model: config.engines.gemini.model, available: true } } : {}),
         },
         sessions: { total: sessions.length, running, active: running },
         connectors,
@@ -903,6 +904,21 @@ export async function handleApiRequest(
       if (!filePath) return notFound(res);
       const content = yaml.load(fs.readFileSync(filePath, "utf-8"));
       return json(res, content);
+    }
+
+    // PATCH /api/org/employees/:name — update employee fields (currently only alwaysNotify)
+    params = matchRoute("/api/org/employees/:name", pathname);
+    if (method === "PATCH" && params) {
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      const body = _parsed.body as any;
+      const { updateEmployeeYaml } = await import("./org.js");
+      const updated = updateEmployeeYaml(params.name, {
+        alwaysNotify: typeof body.alwaysNotify === "boolean" ? body.alwaysNotify : undefined,
+      });
+      if (!updated) return notFound(res);
+      context.emit("org:updated", { employee: params.name });
+      return json(res, { status: "ok" });
     }
 
     // GET /api/org/departments/:name/board
@@ -1840,15 +1856,16 @@ async function runWebSession(
     });
   }
 
+  // If this session has an assigned employee, load their persona
+  let employee: import("../shared/types.js").Employee | undefined;
+  if (currentSession.employee) {
+    const { findEmployee } = await import("./org.js");
+    const { scanOrg } = await import("./org.js");
+    const registry = scanOrg();
+    employee = findEmployee(currentSession.employee, registry);
+  }
+
   try {
-    // If this session has an assigned employee, load their persona
-    let employee: import("../shared/types.js").Employee | undefined;
-    if (currentSession.employee) {
-      const { findEmployee } = await import("./org.js");
-      const { scanOrg } = await import("./org.js");
-      const registry = scanOrg();
-      employee = findEmployee(currentSession.employee, registry);
-    }
 
     const systemPrompt = buildContext({
       source: "web",
@@ -1862,7 +1879,9 @@ async function runWebSession(
 
     const engineConfig = currentSession.engine === "codex"
       ? config.engines.codex
-      : config.engines.claude;
+      : currentSession.engine === "gemini"
+        ? config.engines.gemini ?? config.engines.claude
+        : config.engines.claude;
     const effortLevel = resolveEffort(engineConfig, currentSession, employee);
 
     let lastHeartbeatAt = 0;
@@ -2026,7 +2045,7 @@ async function runWebSession(
             lastError: fallbackResult.error ?? null,
           });
           if (completedFallback) {
-            notifyParentSession(completedFallback, { result: fallbackResult.result, error: fallbackResult.error ?? null, cost: fallbackResult.cost, durationMs: fallbackResult.durationMs });
+            notifyParentSession(completedFallback, { result: fallbackResult.result, error: fallbackResult.error ?? null, cost: fallbackResult.cost, durationMs: fallbackResult.durationMs }, { alwaysNotify: employee?.alwaysNotify });
           }
 
           context.emit("session:completed", {
@@ -2173,7 +2192,7 @@ async function runWebSession(
             notifyDiscordChannel(
               `✅ Claude usage limit cleared. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} resumed.`,
             );
-            notifyParentSession(completedAfterRetry, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs });
+            notifyParentSession(completedAfterRetry, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs }, { alwaysNotify: employee?.alwaysNotify });
           }
 
           context.emit("session:completed", {
@@ -2200,7 +2219,7 @@ async function runWebSession(
           lastError: "Claude usage limit did not clear in time",
         });
         if (erroredSession) {
-          notifyParentSession(erroredSession, { error: "Claude usage limit did not clear in time" });
+          notifyParentSession(erroredSession, { error: "Claude usage limit did not clear in time" }, { alwaysNotify: employee?.alwaysNotify });
         }
         context.emit("session:completed", {
           sessionId: currentSession.id,
@@ -2234,7 +2253,7 @@ async function runWebSession(
       }
     }
     if (completedSession) {
-      notifyParentSession(completedSession, { result: result.result, error: result.error ?? null, cost: result.cost, durationMs: result.durationMs });
+      notifyParentSession(completedSession, { result: result.result, error: result.error ?? null, cost: result.cost, durationMs: result.durationMs }, { alwaysNotify: employee?.alwaysNotify });
     }
 
     context.emit("session:completed", {
@@ -2264,7 +2283,7 @@ async function runWebSession(
       lastError: errMsg,
     });
     if (erroredSession) {
-      notifyParentSession(erroredSession, { error: errMsg });
+      notifyParentSession(erroredSession, { error: errMsg }, { alwaysNotify: employee?.alwaysNotify });
     }
     context.emit("session:completed", {
       sessionId: currentSession.id,

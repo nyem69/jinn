@@ -33,6 +33,12 @@ interface Session {
   [key: string]: unknown
 }
 
+export interface SidebarOrder {
+  sessionIds: string[]
+  employeeNames: string[]
+  employeeSessionMap: Record<string, string[]>
+}
+
 interface ChatSidebarProps {
   selectedId: string | null
   onSelect: (id: string) => void
@@ -40,6 +46,7 @@ interface ChatSidebarProps {
   onDelete?: (id: string) => void
   onSessionsLoaded?: (sessions: Session[]) => void
   onEmployeeSessionsAvailable?: (sessions: Session[]) => void
+  onOrderComputed?: (order: SidebarOrder) => void
 }
 
 interface FlatItem {
@@ -219,6 +226,7 @@ export function ChatSidebar({
   onDelete,
   onSessionsLoaded,
   onEmployeeSessionsAvailable,
+  onOrderComputed,
 }: ChatSidebarProps) {
   const { settings } = useSettings()
   const portalName = settings.portalName ?? "Jinn"
@@ -370,6 +378,39 @@ export function ChatSidebar({
   }
 
   async function handleDelete(sessionId: string) {
+    // Compute next session to select before removing
+    let nextSelectId: string | null = null
+    if (selectedId === sessionId) {
+      // Build a flat ordered list of all visible session IDs
+      const allVisible: string[] = []
+      const addGroup = (items: FlatItem[]) => {
+        for (const item of items) {
+          const empName = item.employeeName!
+          const empSessions = item.sessions || []
+          // Always add the latest session (employee row click selects it)
+          if (empSessions.length === 1) {
+            allVisible.push(empSessions[0].id)
+          } else if (expanded[empName]) {
+            const visible = fullyExpanded[empName] ? empSessions : empSessions.slice(0, 5)
+            for (const s of visible) allVisible.push(s.id)
+          } else {
+            // Collapsed — only the latest session is reachable
+            if (empSessions.length > 0) allVisible.push(empSessions[0].id)
+          }
+        }
+      }
+      addGroup(pinnedFlat)
+      addGroup(unpinnedFlat)
+      for (const s of sortedCron) allVisible.push(s.id)
+
+      const idx = allVisible.indexOf(sessionId)
+      if (idx !== -1) {
+        // Prefer next item, then previous
+        if (idx + 1 < allVisible.length) nextSelectId = allVisible[idx + 1]
+        else if (idx - 1 >= 0) nextSelectId = allVisible[idx - 1]
+      }
+    }
+
     try {
       await deleteSessionMutation.mutateAsync(sessionId)
       setPinnedSessions((prev) => {
@@ -380,8 +421,13 @@ export function ChatSidebar({
         return next
       })
       startTransition(() => {
-        if (onDelete) onDelete(sessionId)
-        else if (selectedId === sessionId) onNewChat()
+        if (nextSelectId) {
+          onSelect(nextSelectId)
+        } else if (onDelete) {
+          onDelete(sessionId)
+        } else if (selectedId === sessionId) {
+          onNewChat()
+        }
       })
     } catch {}
   }
@@ -459,6 +505,31 @@ export function ChatSidebar({
   const cronCollapsed = collapsed.has("cron")
   const sortedCron = sortSessionsByActivity(cronSessions)
 
+  // Emit flat session order for keyboard navigation (J/K/E shortcuts)
+  const orderRef = useRef<string>('')
+  const allFlatIds = useMemo(() => {
+    const ids: string[] = []
+    const empNames: string[] = []
+    const empMap: Record<string, string[]> = {}
+    for (const item of [...pinnedFlat, ...unpinnedFlat]) {
+      const name = item.employeeName!
+      empNames.push(name)
+      const sessionIds = item.sessions!.map(s => s.id)
+      empMap[name] = sessionIds
+      ids.push(...sessionIds)
+    }
+    for (const s of sortedCron) ids.push(s.id)
+    return { sessionIds: ids, employeeNames: empNames, employeeSessionMap: empMap }
+  }, [pinnedFlat, unpinnedFlat, sortedCron])
+
+  useEffect(() => {
+    const key = allFlatIds.sessionIds.join(',')
+    if (key !== orderRef.current) {
+      orderRef.current = key
+      onOrderComputed?.(allFlatIds)
+    }
+  }, [allFlatIds, onOrderComputed])
+
   function isEmployeeActive(empSessions: Session[]): boolean {
     return empSessions.some((s) => s.id === selectedId)
   }
@@ -504,7 +575,7 @@ export function ChatSidebar({
             className={cn(
               "group relative flex w-full items-center gap-2.5 border-l-2 px-4 py-2 text-left transition-colors",
               parentSessions
-                ? "pl-12"
+                ? "pl-11"
                 : "pl-6",
               sessionIsActive
                 ? "border-l-[var(--accent)] bg-[var(--fill-secondary)]"
@@ -607,7 +678,8 @@ export function ChatSidebar({
           </ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem variant="destructive" onClick={() => { if (window.confirm('Delete this session?')) handleDelete(session.id) }}>
-            Delete session
+            <span className="flex-1">Delete session</span>
+            <kbd className="ml-auto pl-3 font-mono text-[10px] text-[var(--text-quaternary)]">⌫</kbd>
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
@@ -653,7 +725,7 @@ export function ChatSidebar({
                 <StatusDot
                   color={dotColor}
                   pulse={pulse}
-                  className="absolute -bottom-0.5 -right-0.5 size-2.5 border-2 border-[var(--sidebar-bg)]"
+                  className="absolute -bottom-0.5 -right-0 size-2.5 border-2 border-[var(--sidebar-bg)]"
                 />
               </div>
 
@@ -745,7 +817,7 @@ export function ChatSidebar({
         {isExpanded && sessionCount > 5 && !fullyExpanded[empName] ? (
           <button
             onClick={() => setFullyExpanded((prev) => ({ ...prev, [empName]: true }))}
-            className="w-full cursor-pointer px-4 pb-2 pl-12 text-left text-[10px] text-[var(--text-quaternary)] transition-colors hover:text-[var(--text-secondary)]"
+            className="w-full cursor-pointer px-4 pb-2 pl-11 text-left text-[10px] text-[var(--text-quaternary)] transition-colors hover:text-[var(--text-secondary)]"
           >
             +{sessionCount - 5} more
           </button>
@@ -760,10 +832,10 @@ export function ChatSidebar({
         <div className="mb-2 flex items-center justify-between gap-3">
           <div>
             <h2 className="text-xl font-bold tracking-[-0.03em] text-foreground">Chats</h2>
-            <p className="text-xs text-muted-foreground">Sessions, employees, and cron runs</p>
+            <p className="text-xs text-muted-foreground">All conversations</p>
           </div>
           <div className="flex items-center gap-1.5">
-            <Button size="sm" className="gap-1.5" onClick={onNewChat}>
+            <Button size="sm" className="gap-1.5" onClick={onNewChat} title="New chat (N)">
               <Plus className="size-3.5" />
               New
             </Button>
@@ -773,10 +845,11 @@ export function ChatSidebar({
         <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] px-3 py-2">
           <Search className="size-3.5 shrink-0 text-[var(--text-tertiary)]" />
           <input
+            id="chat-search"
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search chats..."
+            placeholder="Search..."
             aria-label="Search chats"
             className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-[var(--text-tertiary)]"
           />
@@ -792,7 +865,7 @@ export function ChatSidebar({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto py-1">
+      <div className="flex-1 overflow-y-auto">
         {loading ? (
           <div className="px-4 py-8 text-center text-xs text-[var(--text-quaternary)]">
             Loading sessions...

@@ -12,6 +12,9 @@ export function cleanPreview(raw: string): string {
   text = text.replace(/^#{1,6}\s+/gm, "")
   // Strip bold/italic markers
   text = text.replace(/\*{1,3}|_{1,3}/g, "")
+  // Strip list markers (-, *, •, numbered)
+  text = text.replace(/^[\s]*[-*•]\s+/gm, "")
+  text = text.replace(/^[\s]*\d+[.)]\s+/gm, "")
   // Strip blockquotes
   text = text.replace(/^>\s*/gm, "")
   // Strip inline code backticks

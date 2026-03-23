@@ -210,6 +210,8 @@ export interface Employee {
   maxCostUsd?: number;
   /** Default effort level for sessions assigned to this employee */
   effortLevel?: string;
+  /** Whether to notify the parent session when this employee's child session completes. Default: true */
+  alwaysNotify?: boolean;
 }
 
 export interface Department {
@@ -283,6 +285,12 @@ export interface DiscordConnectorConfig {
   proxyVia?: string;
 }
 
+export interface TelegramConnectorConfig {
+  botToken: string;
+  allowFrom?: number[];
+  ignoreOldMessagesOnBoot?: boolean;
+}
+
 export interface WhatsAppConnectorConfig {
   /** Where to store session credentials (default: JINN_HOME/.whatsapp-auth) */
   authDir?: string;
@@ -302,13 +310,15 @@ export interface JinnConfig {
   jinn?: { version?: string };
   gateway: { port: number; host: string; streaming?: boolean };
   engines: {
-    default: "claude" | "codex";
+    default: "claude" | "codex" | "gemini";
     claude: { bin: string; model: string; effortLevel?: string; childEffortOverride?: string };
     codex: { bin: string; model: string; effortLevel?: string; childEffortOverride?: string };
+    gemini?: { bin: string; model: string; effortLevel?: string; childEffortOverride?: string };
   };
   connectors: Record<string, any> & {
     web?: WebConnectorConfig;
     slack?: SlackConnectorConfig;
+    telegram?: TelegramConnectorConfig;
     discord?: DiscordConnectorConfig;
     whatsapp?: WhatsAppConnectorConfig;
   };

@@ -64,13 +64,10 @@ export function useChatTabs() {
    */
   const openTab = useCallback((tab: ChatTab) => {
     setState((current) => {
-      // Already open? Just switch to it
+      // Already open? Just switch to it — keep existing label/status
       const existing = current.tabs.findIndex((t) => t.sessionId === tab.sessionId)
       if (existing >= 0) {
-        const nextTabs = current.tabs.map((existingTab, index) =>
-          index === existing ? { ...existingTab, ...tab, pinned: existingTab.pinned || tab.pinned } : existingTab
-        )
-        return { tabs: nextTabs, activeIndex: existing }
+        return { ...current, activeIndex: existing }
       }
 
       // If incoming tab is not explicitly pinned, replace the existing preview tab
