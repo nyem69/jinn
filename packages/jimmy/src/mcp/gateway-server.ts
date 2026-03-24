@@ -359,8 +359,8 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         pollInterval = Math.min(pollInterval * 2, 5000); // exponential back-off, cap at 5s
       }
 
-      // Timeout — interrupt orphaned child and return partial info
-      await apiPost(`/api/sessions/${childId}/interrupt`, {}).catch(() => {});
+      // Timeout — stop orphaned child and return partial info
+      await apiPost(`/api/sessions/${childId}/stop`, {}).catch(() => {});
       return JSON.stringify({
         sessionId: childId,
         employee: args.employee,
