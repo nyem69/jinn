@@ -14,6 +14,16 @@ import { createInterface } from "node:readline";
 
 const GATEWAY_URL = process.env.JINN_GATEWAY_URL || "http://127.0.0.1:7777";
 
+// Validate that the gateway URL points to a loopback address
+try {
+  const gwUrl = new URL(GATEWAY_URL);
+  if (!["127.0.0.1", "::1", "localhost"].includes(gwUrl.hostname)) {
+    process.stderr.write(`[jinn-mcp] WARNING: JINN_GATEWAY_URL points to non-loopback address "${gwUrl.hostname}" — possible SSRF risk\n`);
+  }
+} catch {
+  process.stderr.write(`[jinn-mcp] WARNING: JINN_GATEWAY_URL is not a valid URL: "${GATEWAY_URL}"\n`);
+}
+
 // ─── MCP Protocol Types ───
 
 interface JsonRpcRequest {
@@ -209,8 +219,12 @@ const TOOLS = [
 
 // ─── API Helpers ───
 
+const API_TIMEOUT_MS = 10_000; // 10s per-request timeout
+
 async function apiGet(path: string): Promise<unknown> {
-  const res = await fetch(`${GATEWAY_URL}${path}`);
+  const res = await fetch(`${GATEWAY_URL}${path}`, {
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  });
   if (!res.ok) throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -220,6 +234,7 @@ async function apiPost(path: string, body: unknown): Promise<unknown> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -233,6 +248,7 @@ async function apiPut(path: string, body: unknown): Promise<unknown> {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
   return res.json();
@@ -312,30 +328,35 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         ? Math.min(rawTimeout, 600) : 300;
       const timeoutMs = timeoutSec * 1000;
       const startTime = Date.now();
-      const pollInterval = 2000; // 2 seconds
+      let pollInterval = 1000; // start at 1s, exponential back-off to 5s cap
+
+      // Initial fast-check after 500ms for quick sub-tasks
+      await new Promise((resolve) => setTimeout(resolve, 500));
 
       // Poll until terminal state or timeout
       while (Date.now() - startTime < timeoutMs) {
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
         const session = await apiGet(`/api/sessions/${childId}`);
-        if (!session || typeof session !== "object") continue;
-        const { status, messages: msgs, lastError, totalCost } = session as Record<string, unknown>;
-        // Terminal states: idle (completed), error, interrupted
-        if (status === "idle" || status === "error" || status === "interrupted") {
-          const messages = Array.isArray(msgs) ? msgs : [];
-          const lastAssistant = [...messages].reverse().find((m: unknown) =>
-            m && typeof m === "object" && (m as Record<string, unknown>).role === "assistant"
-          ) as Record<string, unknown> | undefined;
-          return JSON.stringify({
-            sessionId: childId,
-            employee: args.employee,
-            status,
-            result: lastAssistant?.content || lastError || "(no output)",
-            error: status === "error" ? lastError : null,
-            cost: totalCost,
-            durationMs: Date.now() - startTime,
-          });
+        if (session && typeof session === "object") {
+          const { status, messages: msgs, lastError, totalCost } = session as Record<string, unknown>;
+          // Terminal states: idle (completed), error, interrupted
+          if (status === "idle" || status === "error" || status === "interrupted") {
+            const messages = Array.isArray(msgs) ? msgs : [];
+            const lastAssistant = [...messages].reverse().find((m: unknown) =>
+              m && typeof m === "object" && (m as Record<string, unknown>).role === "assistant"
+            ) as Record<string, unknown> | undefined;
+            return JSON.stringify({
+              sessionId: childId,
+              employee: args.employee,
+              status,
+              result: lastAssistant?.content || lastError || "(no output)",
+              error: status === "error" ? lastError : null,
+              cost: totalCost,
+              durationMs: Date.now() - startTime,
+            });
+          }
         }
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        pollInterval = Math.min(pollInterval * 2, 5000); // exponential back-off, cap at 5s
       }
 
       // Timeout — interrupt orphaned child and return partial info
