@@ -96,6 +96,24 @@ const TOOLS = [
     },
   },
   {
+    name: "invoke_employee",
+    description:
+      "Invoke another employee and wait for their response (synchronous). " +
+      "Unlike create_child_session, this blocks until the employee finishes and returns their output inline. " +
+      "Use for quick sub-tasks like fact-checks, lookups, or data formatting. " +
+      "For long-running tasks, prefer create_child_session instead. Default timeout: 5 minutes.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        employee: { type: "string", description: "Employee name to invoke (e.g. 'historian')" },
+        prompt: { type: "string", description: "Task/instruction for the employee" },
+        parentSessionId: { type: "string", description: "Your current session ID (for tracking)" },
+        timeoutSeconds: { type: "number", description: "Max wait time in seconds (default: 300)" },
+      },
+      required: ["employee", "prompt"],
+    },
+  },
+  {
     name: "list_employees",
     description: "List all employees in the organization with their departments and roles.",
     inputSchema: {
@@ -270,6 +288,59 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         message: args.message,
       });
       return JSON.stringify(result);
+    }
+
+    case "invoke_employee": {
+      // Create a child session and poll until it completes
+      const createResult = await apiPost("/api/sessions", {
+        prompt: args.prompt,
+        employee: args.employee,
+        parentSessionId: args.parentSessionId,
+      });
+      if (!createResult || typeof createResult !== "object" || !("id" in createResult)) {
+        return JSON.stringify({ error: `Failed to create child session for employee "${args.employee}"` });
+      }
+      const childId = (createResult as { id: string }).id;
+
+      const rawTimeout = args.timeoutSeconds;
+      const timeoutSec = typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0
+        ? Math.min(rawTimeout, 600) : 300;
+      const timeoutMs = timeoutSec * 1000;
+      const startTime = Date.now();
+      const pollInterval = 2000; // 2 seconds
+
+      // Poll until terminal state or timeout
+      while (Date.now() - startTime < timeoutMs) {
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        const session = await apiGet(`/api/sessions/${childId}`);
+        if (!session || typeof session !== "object") continue;
+        const { status, messages: msgs, lastError, totalCost } = session as Record<string, unknown>;
+        // Terminal states: idle (completed), error, interrupted
+        if (status === "idle" || status === "error" || status === "interrupted") {
+          const messages = Array.isArray(msgs) ? msgs : [];
+          const lastAssistant = [...messages].reverse().find((m: unknown) =>
+            m && typeof m === "object" && (m as Record<string, unknown>).role === "assistant"
+          ) as Record<string, unknown> | undefined;
+          return JSON.stringify({
+            sessionId: childId,
+            employee: args.employee,
+            status,
+            result: lastAssistant?.content || lastError || "(no output)",
+            error: status === "error" ? lastError : null,
+            cost: totalCost,
+            durationMs: Date.now() - startTime,
+          });
+        }
+      }
+
+      // Timeout — interrupt orphaned child and return partial info
+      await apiPost(`/api/sessions/${childId}/interrupt`, {}).catch(() => {});
+      return JSON.stringify({
+        sessionId: childId,
+        employee: args.employee,
+        status: "timeout",
+        error: `invoke_employee timed out after ${timeoutSec}s — session ${childId} was interrupted.`,
+      });
     }
 
     case "list_employees": {

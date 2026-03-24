@@ -208,6 +208,8 @@ export interface Employee {
   mcp?: boolean | string[];
   /** Max cost in USD for a single session. Overrides global config. */
   maxCostUsd?: number;
+  /** Max duration in minutes for a single session. Overrides global config. */
+  maxDurationMinutes?: number;
   /** Default effort level for sessions assigned to this employee */
   effortLevel?: string;
   /** Whether to notify the parent session when this employee's child session completes. Default: true */

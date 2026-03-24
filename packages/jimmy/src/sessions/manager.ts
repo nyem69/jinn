@@ -8,6 +8,7 @@ import type {
   Session,
   Target,
 } from "../shared/types.js";
+import { isInterruptibleEngine } from "../shared/types.js";
 import {
   accumulateSessionCost,
   createSession,
@@ -237,6 +238,7 @@ export class SessionManager {
 
     // Resolve MCP config before try block so it's accessible in catch for cleanup
     let mcpConfigPath: string | undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
     try {
       const systemPrompt = buildContext({
@@ -322,6 +324,24 @@ export class SessionManager {
             `⚠️ Heads up: Claude usage limits were hit recently, and this looks like a bigger task. If you're near the limit, it may pause${resumeText ? ` until ~${resumeText}` : ""}.`,
           ).catch(() => {});
         }
+      }
+
+      // Session timeout enforcement: employee setting → global config → no limit
+      const timeoutMinutes = employee?.maxDurationMinutes ?? this.config.sessions?.maxDurationMinutes;
+      if (timeoutMinutes && timeoutMinutes > 0 && isInterruptibleEngine(engine)) {
+        timeoutHandle = setTimeout(() => {
+          const wasAlive = engine.isAlive(session.id);
+          logger.info(`Session ${session.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
+          engine.kill(session.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
+          // If engine had no live process, force-interrupt the session directly
+          if (!wasAlive) {
+            logger.warn(`Session ${session.id} has no live engine process — marking interrupted`);
+            updateSession(session.id, {
+              status: "interrupted",
+              lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
+            });
+          }
+        }, timeoutMinutes * 60_000);
       }
 
       const result = await engine.run({
@@ -726,6 +746,7 @@ export class SessionManager {
         await connector.removeReaction(target, "hourglass_flowing_sand").catch(() => {});
       }
     } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
       // Clean up temp attachment files downloaded from Slack
       for (const filePath of attachments) {
         try {

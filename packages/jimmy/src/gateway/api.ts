@@ -50,6 +50,7 @@ import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, ensureFilesDir } from "./files.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "../sessions/callbacks.js";
 import { loadInstances } from "../cli/instances.js";
+import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../mcp/resolver.js";
 
 export interface ApiContext {
   config: JinnConfig;
@@ -1884,6 +1885,15 @@ async function runWebSession(
         : config.engines.claude;
     const effortLevel = resolveEffort(engineConfig, currentSession, employee);
 
+    // Resolve MCP servers for this session (same as connector path in manager.ts)
+    let mcpConfigPath: string | undefined;
+    if (currentSession.engine === "claude") {
+      const mcpConfig = resolveMcpServers(config.mcp, employee);
+      if (Object.keys(mcpConfig.mcpServers).length > 0) {
+        mcpConfigPath = writeMcpConfigFile(mcpConfig, currentSession.id);
+      }
+    }
+
     let lastHeartbeatAt = 0;
     const runHeartbeat = setInterval(() => {
       updateSession(currentSession.id, {
@@ -1891,6 +1901,25 @@ async function runWebSession(
         lastActivity: new Date().toISOString(),
       });
     }, 5000);
+
+    // Session timeout enforcement: employee setting → global config → no limit
+    const timeoutMinutes = employee?.maxDurationMinutes ?? config.sessions?.maxDurationMinutes;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMinutes && timeoutMinutes > 0 && isInterruptibleEngine(engine)) {
+      timeoutHandle = setTimeout(() => {
+        const wasAlive = engine.isAlive(currentSession.id);
+        logger.info(`Web session ${currentSession.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
+        engine.kill(currentSession.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
+        // If engine had no live process, force-interrupt the session directly
+        if (!wasAlive) {
+          logger.warn(`Web session ${currentSession.id} has no live engine process — marking interrupted`);
+          updateSession(currentSession.id, {
+            status: "interrupted",
+            lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
+          });
+        }
+      }, timeoutMinutes * 60_000);
+    }
 
     const syncSinceIso = (currentSession.transportMeta as any)?.claudeSyncSince;
     const syncSinceMs = typeof syncSinceIso === "string" ? new Date(syncSinceIso).getTime() : NaN;
@@ -1914,6 +1943,7 @@ async function runWebSession(
       model: currentSession.model ?? engineConfig.model,
       effortLevel,
       cliFlags: employee?.cliFlags,
+      mcpConfigPath,
       attachments: attachments?.length ? attachments : undefined,
       sessionId: currentSession.id,
       onStream: (delta) => {
@@ -1938,6 +1968,8 @@ async function runWebSession(
       },
     }).finally(() => {
       clearInterval(runHeartbeat);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (mcpConfigPath) cleanupMcpConfigFile(currentSession.id);
     });
 
     if (!getSession(currentSession.id)) {
@@ -2240,9 +2272,9 @@ async function runWebSession(
 
     const completedSession = updateSession(currentSession.id, {
       ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
-      status: result.error ? "error" : "idle",
+      status: wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
       lastActivity: new Date().toISOString(),
-      lastError: result.error ?? null,
+      lastError: wasInterrupted ? null : (result.error ?? null),
     });
     if (syncRequested && !rateLimit.limited && !wasInterrupted) {
       const meta = (getSession(currentSession.id)?.transportMeta || currentSession.transportMeta || {}) as Record<string, unknown>;
