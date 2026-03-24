@@ -8,7 +8,7 @@ import type {
   Session,
   Target,
 } from "../shared/types.js";
-import { isInterruptibleEngine } from "../shared/types.js";
+import { startSessionTimeout } from "../shared/timeout.js";
 import {
   accumulateSessionCost,
   createSession,
@@ -328,21 +328,14 @@ export class SessionManager {
 
       // Session timeout enforcement: employee setting → global config → no limit
       const timeoutMinutes = employee?.maxDurationMinutes ?? this.config.sessions?.maxDurationMinutes;
-      if (timeoutMinutes && timeoutMinutes > 0 && isInterruptibleEngine(engine)) {
-        timeoutHandle = setTimeout(() => {
-          const wasAlive = engine.isAlive(session.id);
-          logger.info(`Session ${session.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
-          engine.kill(session.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
-          // If engine had no live process, force-interrupt the session directly
-          if (!wasAlive) {
-            logger.warn(`Session ${session.id} has no live engine process — marking interrupted`);
-            updateSession(session.id, {
-              status: "interrupted",
-              lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
-            });
-          }
-        }, timeoutMinutes * 60_000);
-      }
+      timeoutHandle = startSessionTimeout(engine, session.id, timeoutMinutes, {
+        employeeName: employee?.name,
+        source: session.source,
+        onForceInterrupt: () => updateSession(session.id, {
+          status: "interrupted",
+          lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
+        }),
+      });
 
       const result = await engine.run({
         prompt: promptToRun,

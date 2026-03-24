@@ -6,6 +6,7 @@ import path from "node:path";
 import yaml from "js-yaml";
 import type { CronJob, Engine, IncomingMessage, JinnConfig, Session, Target } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
+import { startSessionTimeout } from "../shared/timeout.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { buildContext } from "../sessions/context.js";
 import {
@@ -1888,9 +1889,13 @@ async function runWebSession(
     // Resolve MCP servers for this session (same as connector path in manager.ts)
     let mcpConfigPath: string | undefined;
     if (currentSession.engine === "claude") {
-      const mcpConfig = resolveMcpServers(config.mcp, employee);
-      if (Object.keys(mcpConfig.mcpServers).length > 0) {
-        mcpConfigPath = writeMcpConfigFile(mcpConfig, currentSession.id);
+      try {
+        const mcpConfig = resolveMcpServers(config.mcp, employee);
+        if (Object.keys(mcpConfig.mcpServers).length > 0) {
+          mcpConfigPath = writeMcpConfigFile(mcpConfig, currentSession.id);
+        }
+      } catch (err) {
+        logger.warn(`Failed to write MCP config for session ${currentSession.id}: ${err instanceof Error ? err.message : err}`);
       }
     }
 
@@ -1904,22 +1909,14 @@ async function runWebSession(
 
     // Session timeout enforcement: employee setting → global config → no limit
     const timeoutMinutes = employee?.maxDurationMinutes ?? config.sessions?.maxDurationMinutes;
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    if (timeoutMinutes && timeoutMinutes > 0 && isInterruptibleEngine(engine)) {
-      timeoutHandle = setTimeout(() => {
-        const wasAlive = engine.isAlive(currentSession.id);
-        logger.info(`Web session ${currentSession.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
-        engine.kill(currentSession.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
-        // If engine had no live process, force-interrupt the session directly
-        if (!wasAlive) {
-          logger.warn(`Web session ${currentSession.id} has no live engine process — marking interrupted`);
-          updateSession(currentSession.id, {
-            status: "interrupted",
-            lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
-          });
-        }
-      }, timeoutMinutes * 60_000);
-    }
+    const timeoutHandle = startSessionTimeout(engine, currentSession.id, timeoutMinutes, {
+      employeeName: employee?.name,
+      source: "web",
+      onForceInterrupt: () => updateSession(currentSession.id, {
+        status: "interrupted",
+        lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
+      }),
+    });
 
     const syncSinceIso = (currentSession.transportMeta as any)?.claudeSyncSince;
     const syncSinceMs = typeof syncSinceIso === "string" ? new Date(syncSinceIso).getTime() : NaN;

@@ -100,15 +100,18 @@ const TOOLS = [
     description:
       "Invoke another employee and wait for their response (synchronous). " +
       "Unlike create_child_session, this blocks until the employee finishes and returns their output inline. " +
-      "Use for quick sub-tasks like fact-checks, lookups, or data formatting. " +
-      "For long-running tasks, prefer create_child_session instead. Default timeout: 5 minutes.",
+      "WARNING: This blocks the MCP channel for the full duration — no other MCP tools can be called while waiting. " +
+      "Use for quick sub-tasks like fact-checks, lookups, or data formatting (under 2 minutes). " +
+      "For long-running tasks, prefer create_child_session instead. Default timeout: 5 minutes, max 10 minutes.",
     inputSchema: {
       type: "object" as const,
       properties: {
         employee: { type: "string", description: "Employee name to invoke (e.g. 'historian')" },
         prompt: { type: "string", description: "Task/instruction for the employee" },
         parentSessionId: { type: "string", description: "Your current session ID (for tracking)" },
-        timeoutSeconds: { type: "number", description: "Max wait time in seconds (default: 300)" },
+        timeoutSeconds: { type: "number", description: "Max wait time in seconds (default: 300, max: 600)" },
+        engine: { type: "string", description: "Engine override (e.g. 'codex' for cheaper sub-tasks)" },
+        model: { type: "string", description: "Model override (e.g. 'sonnet' for faster responses)" },
       },
       required: ["employee", "prompt"],
     },
@@ -296,6 +299,8 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         prompt: args.prompt,
         employee: args.employee,
         parentSessionId: args.parentSessionId,
+        ...(args.engine ? { engine: args.engine } : {}),
+        ...(args.model ? { model: args.model } : {}),
       });
       if (!createResult || typeof createResult !== "object" || !("id" in createResult)) {
         return JSON.stringify({ error: `Failed to create child session for employee "${args.employee}"` });
