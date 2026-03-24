@@ -1892,6 +1892,16 @@ async function runWebSession(
       });
     }, 5000);
 
+    // Session timeout enforcement: employee setting → global config → no limit
+    const timeoutMinutes = employee?.maxDurationMinutes ?? config.sessions?.maxDurationMinutes;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMinutes && timeoutMinutes > 0 && isInterruptibleEngine(engine)) {
+      timeoutHandle = setTimeout(() => {
+        logger.warn(`Web session ${currentSession.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
+        engine.kill(currentSession.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
+      }, timeoutMinutes * 60_000);
+    }
+
     const syncSinceIso = (currentSession.transportMeta as any)?.claudeSyncSince;
     const syncSinceMs = typeof syncSinceIso === "string" ? new Date(syncSinceIso).getTime() : NaN;
     const syncRequested = currentSession.engine === "claude" && typeof syncSinceIso === "string" && Number.isFinite(syncSinceMs);
@@ -1938,6 +1948,7 @@ async function runWebSession(
       },
     }).finally(() => {
       clearInterval(runHeartbeat);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     });
 
     if (!getSession(currentSession.id)) {

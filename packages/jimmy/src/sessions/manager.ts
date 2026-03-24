@@ -8,6 +8,7 @@ import type {
   Session,
   Target,
 } from "../shared/types.js";
+import { isInterruptibleEngine } from "../shared/types.js";
 import {
   accumulateSessionCost,
   createSession,
@@ -324,6 +325,16 @@ export class SessionManager {
         }
       }
 
+      // Session timeout enforcement: employee setting → global config → no limit
+      const timeoutMinutes = employee?.maxDurationMinutes ?? this.config.sessions?.maxDurationMinutes;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      if (timeoutMinutes && timeoutMinutes > 0 && isInterruptibleEngine(engine)) {
+        timeoutHandle = setTimeout(() => {
+          logger.warn(`Session ${session.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
+          engine.kill(session.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
+        }, timeoutMinutes * 60_000);
+      }
+
       const result = await engine.run({
         prompt: promptToRun,
         resumeSessionId: session.engineSessionId ?? undefined,
@@ -337,6 +348,8 @@ export class SessionManager {
         attachments: attachments.length > 0 ? attachments : undefined,
         sessionId: session.id,
       });
+
+      if (timeoutHandle) clearTimeout(timeoutHandle);
 
       const wasInterrupted = result.error?.startsWith("Interrupted");
 
