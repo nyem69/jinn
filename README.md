@@ -59,6 +59,8 @@ When Claude Code gets better, Jinn gets better — automatically.
 - 📦 **Skills system** — reusable markdown playbooks that engines follow natively
 - 🏢 **Multi-instance** — run multiple isolated Jinn instances side by side
 - 🔗 **MCP support** — connect to any MCP server
+- ⏱️ **Session timeouts** — kill runaway sessions after configurable duration (global or per-employee)
+- 🤝 **Synchronous employee invocation** — `invoke_employee` MCP tool for inline sub-tasks
 
 ## 🚀 Quick Start
 
@@ -113,6 +115,9 @@ engines:
   codex:
     enabled: false
 
+sessions:
+  maxDurationMinutes: 30   # kill sessions that run longer than this
+
 connectors:
   slack:
     enabled: true
@@ -125,11 +130,37 @@ cron:
       schedule: "0 9 * * *"
       task: "Review open PRs"
 
+mcp:
+  gateway:
+    enabled: true          # expose gateway tools to employees via MCP
+
 org:
   agents:
     - name: reviewer
       role: code-review
 ```
+
+### Session Timeouts
+
+Sessions can be time-limited at two levels. The global `sessions.maxDurationMinutes` in `config.yaml` applies to all sessions. Per-employee overrides take precedence:
+
+```yaml
+# org/historian.yaml
+maxDurationMinutes: 10     # override global limit for this employee
+```
+
+When a session exceeds its limit, the engine process is killed via SIGTERM. If the engine hasn't started yet (session queued), it is marked as interrupted directly.
+
+### Synchronous Employee Invocation
+
+The `invoke_employee` MCP tool lets employees call other employees inline and get the result back synchronously — useful for fact-checks, lookups, and data formatting without the complexity of async child sessions:
+
+```
+invoke_employee(employee: "historian", prompt: "When was GE14?")
+→ { status: "idle", result: "GE14 was held on 9 May 2018...", durationMs: 16045 }
+```
+
+Timeout is clamped to 600s max. Orphaned child sessions are automatically interrupted on timeout.
 
 ## 📁 Project Structure
 
@@ -199,7 +230,7 @@ Jinn is under active development. Here's what's coming:
 ### 👥 Org System
 - [x] **Agent-to-agent messaging** — direct communication without board intermediary
 - [x] **Shared memory** — cross-session knowledge that persists across employees
-- [ ] **Performance tracking** — automatic quality scoring per employee over time
+- [x] **Performance tracking** — employee performance archive with task success rates and quality scoring
 - [x] **Auto-promotion** — promote employees to manager based on track record
 
 ### 🌐 Web Dashboard
@@ -211,6 +242,7 @@ Jinn is under active development. Here's what's coming:
 
 ### 🛠️ Platform
 - [ ] **Plugin system** — installable plugins for common integrations (Stripe, Linear, GitHub)
+- [x] **Session timeouts** — configurable `maxDurationMinutes` per-employee or global
 - [ ] **REST API auth** — API keys for secure remote access
 - [ ] **Multi-user support** — team access with roles and permissions
 - [ ] **Docker image** — one-command deployment with `docker run`
