@@ -1907,10 +1907,11 @@ async function runWebSession(
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     if (timeoutMinutes && timeoutMinutes > 0 && isInterruptibleEngine(engine)) {
       timeoutHandle = setTimeout(() => {
-        logger.warn(`Web session ${currentSession.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
+        const wasAlive = engine.isAlive(currentSession.id);
+        logger.info(`Web session ${currentSession.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
         engine.kill(currentSession.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
-        // If engine.kill() was a no-op (no live process yet), force-interrupt the session
-        if (!engine.isAlive(currentSession.id)) {
+        // If engine had no live process, force-interrupt the session directly
+        if (!wasAlive) {
           logger.warn(`Web session ${currentSession.id} has no live engine process — marking interrupted`);
           updateSession(currentSession.id, {
             status: "interrupted",
@@ -1968,7 +1969,7 @@ async function runWebSession(
     }).finally(() => {
       clearInterval(runHeartbeat);
       if (timeoutHandle) clearTimeout(timeoutHandle);
-      if (mcpConfigPath) cleanupMcpConfigFile(mcpConfigPath);
+      if (mcpConfigPath) cleanupMcpConfigFile(currentSession.id);
     });
 
     if (!getSession(currentSession.id)) {
@@ -2271,9 +2272,9 @@ async function runWebSession(
 
     const completedSession = updateSession(currentSession.id, {
       ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
-      status: result.error ? "error" : "idle",
+      status: wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
       lastActivity: new Date().toISOString(),
-      lastError: result.error ?? null,
+      lastError: wasInterrupted ? null : (result.error ?? null),
     });
     if (syncRequested && !rateLimit.limited && !wasInterrupted) {
       const meta = (getSession(currentSession.id)?.transportMeta || currentSession.transportMeta || {}) as Record<string, unknown>;

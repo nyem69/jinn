@@ -296,42 +296,50 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         prompt: args.prompt,
         employee: args.employee,
         parentSessionId: args.parentSessionId,
-      }) as any;
-      const childId = createResult.id;
-      if (!childId) return JSON.stringify({ error: "Failed to create child session", detail: createResult });
+      });
+      if (!createResult || typeof createResult !== "object" || !("id" in createResult)) {
+        return JSON.stringify({ error: `Failed to create child session for employee "${args.employee}"` });
+      }
+      const childId = (createResult as { id: string }).id;
 
-      const timeoutMs = ((args.timeoutSeconds as number) || 300) * 1000;
+      const rawTimeout = args.timeoutSeconds;
+      const timeoutSec = typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0
+        ? Math.min(rawTimeout, 600) : 300;
+      const timeoutMs = timeoutSec * 1000;
       const startTime = Date.now();
       const pollInterval = 2000; // 2 seconds
 
       // Poll until terminal state or timeout
       while (Date.now() - startTime < timeoutMs) {
         await new Promise((resolve) => setTimeout(resolve, pollInterval));
-        const session = await apiGet(`/api/sessions/${childId}`) as any;
-        const status = session.status;
+        const session = await apiGet(`/api/sessions/${childId}`);
+        if (!session || typeof session !== "object") continue;
+        const { status, messages: msgs, lastError, totalCost } = session as Record<string, unknown>;
         // Terminal states: idle (completed), error, interrupted
         if (status === "idle" || status === "error" || status === "interrupted") {
-          // Extract the last assistant message as the result
-          const messages = session.messages || [];
-          const lastAssistant = [...messages].reverse().find((m: any) => m.role === "assistant");
+          const messages = Array.isArray(msgs) ? msgs : [];
+          const lastAssistant = [...messages].reverse().find((m: unknown) =>
+            m && typeof m === "object" && (m as Record<string, unknown>).role === "assistant"
+          ) as Record<string, unknown> | undefined;
           return JSON.stringify({
             sessionId: childId,
             employee: args.employee,
             status,
-            result: lastAssistant?.content || session.lastError || "(no output)",
-            error: status === "error" ? session.lastError : null,
-            cost: session.totalCost,
+            result: lastAssistant?.content || lastError || "(no output)",
+            error: status === "error" ? lastError : null,
+            cost: totalCost,
             durationMs: Date.now() - startTime,
           });
         }
       }
 
-      // Timeout — return partial info
+      // Timeout — interrupt orphaned child and return partial info
+      await apiPost(`/api/sessions/${childId}/interrupt`, {}).catch(() => {});
       return JSON.stringify({
         sessionId: childId,
         employee: args.employee,
         status: "timeout",
-        error: `invoke_employee timed out after ${Math.round(timeoutMs / 1000)}s — session ${childId} is still running. Use get_session to check later.`,
+        error: `invoke_employee timed out after ${timeoutSec}s — session ${childId} was interrupted.`,
       });
     }
 

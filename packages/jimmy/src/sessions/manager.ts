@@ -238,6 +238,7 @@ export class SessionManager {
 
     // Resolve MCP config before try block so it's accessible in catch for cleanup
     let mcpConfigPath: string | undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
     try {
       const systemPrompt = buildContext({
@@ -327,13 +328,13 @@ export class SessionManager {
 
       // Session timeout enforcement: employee setting → global config → no limit
       const timeoutMinutes = employee?.maxDurationMinutes ?? this.config.sessions?.maxDurationMinutes;
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       if (timeoutMinutes && timeoutMinutes > 0 && isInterruptibleEngine(engine)) {
         timeoutHandle = setTimeout(() => {
-          logger.warn(`Session ${session.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
+          const wasAlive = engine.isAlive(session.id);
+          logger.info(`Session ${session.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
           engine.kill(session.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
-          // If engine.kill() was a no-op (no live process yet), force-interrupt the session
-          if (!engine.isAlive(session.id)) {
+          // If engine had no live process, force-interrupt the session directly
+          if (!wasAlive) {
             logger.warn(`Session ${session.id} has no live engine process — marking interrupted`);
             updateSession(session.id, {
               status: "interrupted",
@@ -356,8 +357,6 @@ export class SessionManager {
         attachments: attachments.length > 0 ? attachments : undefined,
         sessionId: session.id,
       });
-
-      if (timeoutHandle) clearTimeout(timeoutHandle);
 
       const wasInterrupted = result.error?.startsWith("Interrupted");
 
@@ -747,6 +746,7 @@ export class SessionManager {
         await connector.removeReaction(target, "hourglass_flowing_sand").catch(() => {});
       }
     } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
       // Clean up temp attachment files downloaded from Slack
       for (const filePath of attachments) {
         try {
