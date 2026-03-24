@@ -50,6 +50,7 @@ import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, ensureFilesDir } from "./files.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "../sessions/callbacks.js";
 import { loadInstances } from "../cli/instances.js";
+import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../mcp/resolver.js";
 
 export interface ApiContext {
   config: JinnConfig;
@@ -1884,6 +1885,15 @@ async function runWebSession(
         : config.engines.claude;
     const effortLevel = resolveEffort(engineConfig, currentSession, employee);
 
+    // Resolve MCP servers for this session (same as connector path in manager.ts)
+    let mcpConfigPath: string | undefined;
+    if (currentSession.engine === "claude") {
+      const mcpConfig = resolveMcpServers(config.mcp, employee);
+      if (Object.keys(mcpConfig.mcpServers).length > 0) {
+        mcpConfigPath = writeMcpConfigFile(mcpConfig, currentSession.id);
+      }
+    }
+
     let lastHeartbeatAt = 0;
     const runHeartbeat = setInterval(() => {
       updateSession(currentSession.id, {
@@ -1924,6 +1934,7 @@ async function runWebSession(
       model: currentSession.model ?? engineConfig.model,
       effortLevel,
       cliFlags: employee?.cliFlags,
+      mcpConfigPath,
       attachments: attachments?.length ? attachments : undefined,
       sessionId: currentSession.id,
       onStream: (delta) => {
@@ -1949,6 +1960,7 @@ async function runWebSession(
     }).finally(() => {
       clearInterval(runHeartbeat);
       if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (mcpConfigPath) cleanupMcpConfigFile(mcpConfigPath);
     });
 
     if (!getSession(currentSession.id)) {
