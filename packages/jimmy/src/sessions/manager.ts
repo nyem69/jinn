@@ -332,6 +332,14 @@ export class SessionManager {
         timeoutHandle = setTimeout(() => {
           logger.warn(`Session ${session.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
           engine.kill(session.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
+          // If engine.kill() was a no-op (no live process yet), force-interrupt the session
+          if (!engine.isAlive(session.id)) {
+            logger.warn(`Session ${session.id} has no live engine process — marking interrupted`);
+            updateSession(session.id, {
+              status: "interrupted",
+              lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
+            });
+          }
         }, timeoutMinutes * 60_000);
       }
 

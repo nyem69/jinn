@@ -1909,6 +1909,14 @@ async function runWebSession(
       timeoutHandle = setTimeout(() => {
         logger.warn(`Web session ${currentSession.id} exceeded ${timeoutMinutes}m timeout — killing engine`);
         engine.kill(currentSession.id, `Interrupted: session timeout (${timeoutMinutes}m)`);
+        // If engine.kill() was a no-op (no live process yet), force-interrupt the session
+        if (!engine.isAlive(currentSession.id)) {
+          logger.warn(`Web session ${currentSession.id} has no live engine process — marking interrupted`);
+          updateSession(currentSession.id, {
+            status: "interrupted",
+            lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
+          });
+        }
       }, timeoutMinutes * 60_000);
     }
 
