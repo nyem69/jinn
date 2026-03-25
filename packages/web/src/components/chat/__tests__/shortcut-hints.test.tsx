@@ -9,6 +9,7 @@ vi.mock('@/hooks/use-sessions', () => ({
   useUpdateSession: () => ({ mutate: vi.fn() }),
   useDeleteSession: () => ({ mutateAsync: vi.fn() }),
   useBulkDeleteSessions: () => ({ mutateAsync: vi.fn() }),
+  useDuplicateSession: () => ({ mutate: vi.fn() }),
 }))
 
 vi.mock('@/lib/api', () => ({
