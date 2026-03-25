@@ -238,6 +238,13 @@ export class SessionManager {
     // Resolve MCP config before try block so it's accessible in catch for cleanup
     let mcpConfigPath: string | undefined;
 
+    let hierarchy: import("../shared/types.js").OrgHierarchy | undefined;
+    try {
+      const { scanOrg } = await import("../gateway/org.js");
+      const { resolveOrgHierarchy } = await import("../gateway/org-hierarchy.js");
+      hierarchy = resolveOrgHierarchy(scanOrg());
+    } catch { /* fallback to filesystem scan in context builder */ }
+
     try {
       const systemPrompt = buildContext({
         source: session.source,
@@ -249,6 +256,7 @@ export class SessionManager {
         config: this.config,
         sessionId: session.id,
         channelName: (msg.transportMeta?.channelName as string) || undefined,
+        hierarchy,
       });
 
       const engineConfig = session.engine === "codex"

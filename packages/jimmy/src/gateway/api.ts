@@ -889,62 +889,60 @@ export async function handleApiRequest(
 
     // GET /api/org
     if (method === "GET" && pathname === "/api/org") {
-      if (!fs.existsSync(ORG_DIR)) return json(res, { departments: [], employees: [] });
+      if (!fs.existsSync(ORG_DIR)) return json(res, { departments: [], employees: [], hierarchy: { root: null, sorted: [], warnings: [] } });
       const entries = fs.readdirSync(ORG_DIR, { withFileTypes: true });
       const departments = entries
         .filter((e) => e.isDirectory())
         .map((e) => e.name);
-      const employees: string[] = [];
-      // Scan root-level YAML files
-      for (const e of entries) {
-        if (e.isFile() && (e.name.endsWith(".yaml") || e.name.endsWith(".yml"))) {
-          employees.push(e.name.replace(/\.ya?ml$/, ""));
-        }
-      }
-      // Scan employees/ subdirectory
-      const employeesDir = path.join(ORG_DIR, "employees");
-      if (fs.existsSync(employeesDir)) {
-        const empEntries = fs.readdirSync(employeesDir, { withFileTypes: true });
-        for (const e of empEntries) {
-          if (e.isFile() && (e.name.endsWith(".yaml") || e.name.endsWith(".yml"))) {
-            employees.push(e.name.replace(/\.ya?ml$/, ""));
-          }
-        }
-      }
-      // Scan inside each department directory for YAML files (excluding department.yaml)
-      for (const dept of departments) {
-        const deptDir = path.join(ORG_DIR, dept);
-        const deptEntries = fs.readdirSync(deptDir, { withFileTypes: true });
-        for (const e of deptEntries) {
-          if (e.isFile() && (e.name.endsWith(".yaml") || e.name.endsWith(".yml")) && e.name !== "department.yaml") {
-            employees.push(e.name.replace(/\.ya?ml$/, ""));
-          }
-        }
-      }
-      return json(res, { departments, employees });
+
+      const { scanOrg } = await import("./org.js");
+      const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+      const orgRegistry = scanOrg();
+      const hierarchy = resolveOrgHierarchy(orgRegistry);
+
+      const employees = hierarchy.sorted.map((name) => {
+        const node = hierarchy.nodes[name];
+        const emp = node.employee;
+        const { persona, ...rest } = emp;
+        return {
+          ...rest,
+          parentName: node.parentName,
+          directReports: node.directReports,
+          depth: node.depth,
+          chain: node.chain,
+        };
+      });
+
+      return json(res, {
+        departments,
+        employees,
+        hierarchy: {
+          root: hierarchy.root,
+          sorted: hierarchy.sorted,
+          warnings: hierarchy.warnings,
+        },
+      });
     }
 
     // GET /api/org/employees/:name
     params = matchRoute("/api/org/employees/:name", pathname);
     if (method === "GET" && params) {
-      const candidates = [
-        path.join(ORG_DIR, "employees", `${params.name}.yaml`),
-        path.join(ORG_DIR, "employees", `${params.name}.yml`),
-        path.join(ORG_DIR, `${params.name}.yaml`),
-        path.join(ORG_DIR, `${params.name}.yml`),
-      ];
-      // Also search inside each department directory
-      if (fs.existsSync(ORG_DIR)) {
-        const dirs = fs.readdirSync(ORG_DIR, { withFileTypes: true }).filter((e) => e.isDirectory());
-        for (const dir of dirs) {
-          candidates.push(path.join(ORG_DIR, dir.name, `${params.name}.yaml`));
-          candidates.push(path.join(ORG_DIR, dir.name, `${params.name}.yml`));
-        }
-      }
-      const filePath = candidates.find((c) => fs.existsSync(c));
-      if (!filePath) return notFound(res);
-      const content = yaml.load(fs.readFileSync(filePath, "utf-8"));
-      return json(res, content);
+      const { scanOrg } = await import("./org.js");
+      const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+      const orgRegistry = scanOrg();
+      const emp = orgRegistry.get(params.name);
+      if (!emp) return notFound(res);
+
+      const hierarchy = resolveOrgHierarchy(orgRegistry);
+      const node = hierarchy.nodes[params.name];
+
+      return json(res, {
+        ...emp,
+        parentName: node?.parentName ?? null,
+        directReports: node?.directReports ?? [],
+        depth: node?.depth ?? 0,
+        chain: node?.chain ?? [params.name],
+      });
     }
 
     // PATCH /api/org/employees/:name — update employee fields (currently only alwaysNotify)
@@ -1906,6 +1904,10 @@ async function runWebSession(
     employee = findEmployee(currentSession.employee, registry);
   }
 
+  const { scanOrg: scanOrgForHierarchy } = await import("./org.js");
+  const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+  const orgHierarchy = resolveOrgHierarchy(scanOrgForHierarchy());
+
   try {
 
     const systemPrompt = buildContext({
@@ -1916,6 +1918,7 @@ async function runWebSession(
       connectors: Array.from(context.connectors.keys()),
       config,
       sessionId: currentSession.id,
+      hierarchy: orgHierarchy,
     });
 
     const engineConfig = currentSession.engine === "codex"

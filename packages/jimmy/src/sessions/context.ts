@@ -54,6 +54,7 @@ export function buildContext(opts: {
   operatorName?: string;
   language?: string;
   channelName?: string;
+  hierarchy?: import("../shared/types.js").OrgHierarchy;
 }): string {
   const maxChars = opts.config?.context?.maxChars ?? DEFAULT_MAX_CONTEXT_CHARS;
   const sections: Section[] = [];
@@ -73,7 +74,13 @@ export function buildContext(opts: {
     sections.push({
       tier: Tier.ESSENTIAL,
       marker: "# You are",
-      content: buildEmployeeIdentity(opts.employee, portalName, language),
+      content: buildEmployeeIdentity(
+        opts.employee,
+        portalName,
+        language,
+        opts.hierarchy?.nodes[opts.employee.name],
+        opts.hierarchy,
+      ),
       summary: `# You are ${opts.employee.displayName}\nEmployee: ${opts.employee.name}, ${opts.employee.department}, ${opts.employee.rank}`,
     });
   } else {
@@ -114,7 +121,7 @@ export function buildContext(opts: {
   }
 
   // ── STANDARD: Organization ──────────────────────────────────
-  const orgCtx = buildOrgContext();
+  const orgCtx = buildOrgContext(opts.hierarchy);
   if (orgCtx) {
     sections.push({
       tier: Tier.STANDARD,
@@ -203,9 +210,22 @@ export function buildContext(opts: {
 // Section builders
 // ═══════════════════════════════════════════════════════════════
 
-function buildEmployeeIdentity(employee: Employee, portalName: string, language: string): string {
+function buildEmployeeIdentity(
+  employee: Employee,
+  portalName: string,
+  language: string,
+  node?: import("../shared/types.js").OrgNode,
+  hierarchy?: import("../shared/types.js").OrgHierarchy,
+): string {
   const languageInstruction = language !== "English"
     ? `\n**Language**: Always respond in ${language}. All your communication with the user must be in ${language}.\n`
+    : "";
+
+  const reportsToLine = node
+    ? `\n- **Reports to**: ${node.parentName ? (hierarchy?.nodes[node.parentName]?.employee.displayName ?? node.parentName) : "COO"}`
+    : "";
+  const directReportsLine = node
+    ? `\n- **Direct reports**: ${node.directReports.length > 0 ? node.directReports.join(", ") : "(none)"}`
     : "";
 
   return `# You are ${employee.displayName}
@@ -219,7 +239,7 @@ ${languageInstruction}
 - **Name**: ${employee.name}
 - **Display name**: ${employee.displayName}
 - **Department**: ${employee.department}
-- **Rank**: ${employee.rank}
+- **Rank**: ${employee.rank}${reportsToLine}${directReportsLine}
 - **Engine**: ${employee.engine}
 - **Model**: ${employee.model}
 
@@ -316,8 +336,38 @@ function buildConfigContext(config: JinnConfig, gatewayUrl: string): string {
   return lines.join("\n");
 }
 
-function buildOrgContext(): string | null {
+function buildOrgContext(hierarchy?: import("../shared/types.js").OrgHierarchy): string | null {
   try {
+    if (hierarchy && Object.keys(hierarchy.nodes).length > 0) {
+      const MAX_DEPTH = 3;
+      const count = Object.keys(hierarchy.nodes).length;
+      const lines: string[] = [`## Organization (${count} employee(s))`];
+
+      let deepCount = 0;
+      for (const name of hierarchy.sorted) {
+        const node = hierarchy.nodes[name];
+        if (node.depth >= MAX_DEPTH) {
+          deepCount++;
+          continue;
+        }
+        const emp = node.employee;
+        const indent = "  ".repeat(node.depth);
+        let entry = `${indent}- **${emp.displayName}** (${name}) — ${emp.department}, ${emp.rank}`;
+        if (emp.persona) {
+          const firstLine = emp.persona.trim().split("\n")[0].trim().slice(0, 120);
+          entry += `\n${indent}  _${firstLine}_`;
+        }
+        lines.push(entry);
+      }
+      if (deepCount > 0) {
+        lines.push(`${"  ".repeat(MAX_DEPTH)}- ... and ${deepCount} more at deeper levels`);
+      }
+
+      lines.push(`\nYou can create new employees by writing YAML files to \`${ORG_DIR}/\``);
+      return lines.join("\n");
+    }
+
+    // Fallback: filesystem-based flat rendering (backwards compat)
     // Recursively collect all employee yaml files (skip department.yaml)
     const employeeFiles: { fullPath: string; name: string }[] = [];
 
