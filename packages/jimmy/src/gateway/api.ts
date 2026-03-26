@@ -982,6 +982,95 @@ export async function handleApiRequest(
       return json(res, { status: "ok" });
     }
 
+    // GET /api/org/services — list all cross-department services
+    if (method === "GET" && pathname === "/api/org/services") {
+      const { scanOrg } = await import("./org.js");
+      const { buildServiceRegistry } = await import("./services.js");
+      const orgRegistry = scanOrg();
+      const services = buildServiceRegistry(orgRegistry);
+      const result = Array.from(services.values()).map((entry) => ({
+        name: entry.declaration.name,
+        description: entry.declaration.description,
+        provider: {
+          name: entry.provider.name,
+          displayName: entry.provider.displayName,
+          department: entry.provider.department,
+          rank: entry.provider.rank,
+        },
+      }));
+      return json(res, { services: result });
+    }
+
+    // POST /api/org/cross-request — route a service request to the provider
+    if (method === "POST" && pathname === "/api/org/cross-request") {
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      const body = parsed.body as any;
+      const { fromEmployee, service, prompt, parentSessionId } = body;
+      if (!fromEmployee || !service || !prompt) {
+        return badRequest(res, "Missing required fields: fromEmployee, service, prompt");
+      }
+
+      const { scanOrg } = await import("./org.js");
+      const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+      const { buildServiceRegistry, buildRoutePath, resolveManagerChain } = await import("./services.js");
+
+      const orgRegistry = scanOrg();
+      const requester = orgRegistry.get(fromEmployee);
+      if (!requester) return notFound(res);
+
+      const services = buildServiceRegistry(orgRegistry);
+      const entry = services.get(service);
+      if (!entry) {
+        return json(res, { error: `Service "${service}" not found` }, 404);
+      }
+
+      const hierarchy = resolveOrgHierarchy(orgRegistry);
+      const route = buildRoutePath(fromEmployee, entry.provider.name, hierarchy);
+      const managers = resolveManagerChain(route, hierarchy);
+
+      const crossBrief = `## Cross-service request
+
+**From**: ${requester.displayName} (${requester.department})
+**Service**: ${service} — ${entry.declaration.description}
+
+### Request
+${prompt}
+
+---
+Handle this as a priority request from a colleague.`;
+
+      const config = context.getConfig();
+      const session = createSession({
+        engine: entry.provider.engine || config.engines.default,
+        model: entry.provider.model || undefined,
+        source: "cross-request",
+        sourceRef: `cross:${fromEmployee}:${service}`,
+        connector: "web",
+        sessionKey: `cross:${Date.now()}`,
+        replyContext: { source: "cross-request" },
+        employee: entry.provider.name,
+        parentSessionId: parentSessionId || undefined,
+        prompt: crossBrief,
+        portalName: config.portal?.portalName,
+        title: `Cross-request: ${fromEmployee} → ${service}`,
+      });
+      insertMessage(session.id, "user", crossBrief);
+      logger.info(`Cross-request session created: ${session.id} (${fromEmployee} → ${service} → ${entry.provider.name})`);
+
+      return json(res, {
+        sessionId: session.id,
+        provider: {
+          name: entry.provider.name,
+          displayName: entry.provider.displayName,
+          department: entry.provider.department,
+        },
+        route,
+        managers: managers.map((m) => m.employee.name),
+        service,
+      }, 201);
+    }
+
     // GET /api/org/departments/:name/board
     params = matchRoute("/api/org/departments/:name/board", pathname);
     if (method === "GET" && params) {

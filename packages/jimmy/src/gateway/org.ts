@@ -40,6 +40,10 @@ export function scanOrg(): Map<string, Employee> {
               alwaysNotify: typeof data.alwaysNotify === "boolean" ? data.alwaysNotify : true,
               reportsTo: data.reportsTo ?? undefined,
               mcp: data.mcp ?? undefined,
+              provides: Array.isArray(data.provides)
+                ? data.provides.filter((s: unknown) => s && typeof s === "object" && typeof (s as any).name === "string" && typeof (s as any).description === "string")
+                  .map((s: any) => ({ name: s.name as string, description: s.description as string }))
+                : undefined,
             };
             registry.set(employee.name, employee);
           }

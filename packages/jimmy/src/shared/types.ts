@@ -216,6 +216,14 @@ export interface Employee {
   alwaysNotify?: boolean;
   /** Who this employee reports to. String = single parent. Array = primary + dotted-line (future). */
   reportsTo?: string | string[];
+  /** Services this employee provides to the org */
+  provides?: ServiceDeclaration[];
+}
+
+/** A service that an employee can provide to other employees/departments. */
+export interface ServiceDeclaration {
+  name: string;
+  description: string;
 }
 
 /** A node in the resolved org tree. Wraps an Employee with computed hierarchy data. */

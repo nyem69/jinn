@@ -101,6 +101,9 @@ name: backend-dev
 department: engineering
 rank: employee
 reportsTo: lead-developer    # optional — who this employee reports to
+provides:                    # optional — services this employee offers to the org
+  - name: code-review
+    description: "Review PRs and provide feedback"
 ```
 
 - `reportsTo` accepts a single employee name (or an array for future dotted-line support)
@@ -123,10 +126,19 @@ reportsTo: lead-developer    # optional — who this employee reports to
 - **Advisory**: the hierarchy informs delegation via context prompts but never blocks direct access
 - Prefer delegating through managers — they delegate to their reports
 - You can still reach any employee directly when needed (no enforcement)
-- Each employee's system prompt shows their `Reports to` and `Direct reports`
+- Each employee's system prompt shows their chain of command, direct reports, and escalation path
 - Apply oversight levels when reviewing employee work: TRUST (relay directly), VERIFY (spot-check), THOROUGH (full review + multi-turn follow-ups)
 - When a department grows (3+ employees), promote a reliable senior to manager — managers handle their own delegation
 - When hiring, auto-determine `reportsTo` based on the highest-ranked employee in the target department (see management skill)
+
+### Cross-Department Services
+
+Employees can declare services they provide via the `provides` field in their YAML. Other employees can discover and request these services via the API — the system routes requests directly to the provider.
+
+- `GET /api/org/services` — list all available services across the org
+- `POST /api/org/cross-request` — route a request: `{"fromEmployee": "name", "service": "service-name", "prompt": "what you need"}`
+- Each employee's system prompt includes a menu of available services from other departments
+- If two employees provide the same service, the higher-ranked one wins
 
 ### Automatic employee coordination
 
