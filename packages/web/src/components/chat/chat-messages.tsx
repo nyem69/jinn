@@ -85,8 +85,8 @@ function ToolGroup({ msgs, isActive }: { msgs: Message[]; isActive: boolean }) {
 
 function inlineFormat(text: string): React.ReactNode {
   const parts: React.ReactNode[] = []
-  // Markdown links, bare URLs, bold, inline code, italic — in priority order
-  const regex = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)|(https?:\/\/[^\s<]+[^\s<.,;:!?)}\]'"])|(\*\*(.+?)\*\*)|(`([^`]+)`)|\*([^*]+)\*/g
+  // Markdown links (any href), bare URLs, bold, inline code, italic — in priority order
+  const regex = /\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<]+[^\s<.,;:!?)}\]'"])|(\*\*(.+?)\*\*)|(`([^`]+)`)|\*([^*]+)\*/g
   let last = 0
   let match
 

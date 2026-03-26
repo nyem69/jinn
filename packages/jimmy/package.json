@@ -1,6 +1,6 @@
 {
   "name": "jinn-cli",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "Lightweight AI gateway daemon orchestrating Claude Code, Codex, and Gemini CLI",
   "license": "MIT",
   "type": "module",
