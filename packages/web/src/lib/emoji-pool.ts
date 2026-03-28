@@ -22,6 +22,7 @@ export type PoolEmoji = (typeof EMOJI_POOL)[number]
 
 /** Deterministic hash → emoji index from a name string */
 export function emojiForName(name: string): string {
+  if (!name) return EMOJI_POOL[0]
   let hash = 0
   for (let i = 0; i < name.length; i++) {
     hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0

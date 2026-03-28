@@ -95,8 +95,9 @@ export function GlobalSearch() {
     router.push(href)
   }, [router])
 
-  // OrgData.employees is string[] (employee names)
-  const employeeNames: string[] = Array.isArray(orgData?.employees) ? orgData.employees : []
+  const employeeNames: string[] = Array.isArray(orgData?.employees)
+    ? orgData.employees.map((e) => e.name)
+    : []
   const crons = Array.isArray(cronJobs) ? cronJobs : []
   const sessionList = Array.isArray(sessions) ? sessions.slice(0, 10) : []
   const skillList = Array.isArray(skills) ? skills.slice(0, 10) : []

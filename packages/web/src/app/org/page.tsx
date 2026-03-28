@@ -2,10 +2,11 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
-import type { Employee, OrgData } from "@/lib/api";
+import type { Employee, OrgData, OrgHierarchy } from "@/lib/api";
 import { EmployeeDetail } from "@/components/org/employee-detail";
 import { GridView } from "@/components/org/grid-view";
 import { FeedView } from "@/components/org/feed-view";
+import { OrgTree } from "@/components/org/org-tree";
 import { PageLayout } from "@/components/page-layout";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useSettings } from "@/app/settings-provider";
@@ -27,6 +28,7 @@ const OrgMap = dynamic(
 export default function OrgPage() {
   useBreadcrumbs([{ label: 'Organization' }])
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [hierarchy, setHierarchy] = useState<OrgHierarchy | undefined>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Employee | null>(null);
@@ -39,24 +41,7 @@ export default function OrgPage() {
     setError(null);
     api
       .getOrg()
-      .then(async (data: OrgData) => {
-        const details = await Promise.all(
-          data.employees.map(async (name) => {
-            try {
-              return await api.getEmployee(name);
-            } catch {
-              return {
-                name,
-                displayName: name,
-                department: "",
-                rank: "employee" as const,
-                engine: "unknown",
-                model: "unknown",
-                persona: "",
-              };
-            }
-          }),
-        );
+      .then((data: OrgData) => {
         const coo: Employee = {
           name: (settings.portalName ?? "Jinn").toLowerCase(),
           displayName: settings.portalName ?? "Jinn",
@@ -66,7 +51,8 @@ export default function OrgPage() {
           model: "opus",
           persona: "COO and AI gateway daemon",
         };
-        setEmployees([coo, ...details]);
+        setEmployees([coo, ...data.employees]);
+        setHierarchy(data.hierarchy);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -132,6 +118,7 @@ export default function OrgPage() {
                 <TabsTrigger value="map">Map</TabsTrigger>
                 <TabsTrigger value="grid">Grid</TabsTrigger>
                 <TabsTrigger value="list">List</TabsTrigger>
+                <TabsTrigger value="tree">Tree</TabsTrigger>
               </TabsList>
             </div>
 
@@ -143,6 +130,7 @@ export default function OrgPage() {
               ) : (
                 <OrgMap
                   employees={employees}
+                  hierarchy={hierarchy}
                   selectedName={selected?.name ?? null}
                   onNodeClick={handleSelectEmployee}
                 />
@@ -173,6 +161,29 @@ export default function OrgPage() {
                   employees={employees}
                   selectedName={selected?.name ?? null}
                   onSelect={handleSelectEmployee}
+                />
+              )}
+            </TabsContent>
+
+            <TabsContent value="tree" className="flex-1 overflow-auto p-[var(--space-4)]">
+              {loading ? (
+                <div className="flex items-center justify-center h-full text-[var(--text-tertiary)] text-[length:var(--text-caption1)]">
+                  Loading...
+                </div>
+              ) : (
+                <OrgTree
+                  data={{
+                    departments: [],
+                    employees,
+                    hierarchy: hierarchy ?? { root: null, sorted: [], warnings: [] },
+                  }}
+                  selectedEmployee={selected?.name ?? null}
+                  selectedDepartment={null}
+                  onSelectEmployee={(name) => {
+                    const emp = employees.find((e) => e.name === name);
+                    if (emp) handleSelectEmployee(emp);
+                  }}
+                  onSelectDepartment={() => {}}
                 />
               )}
             </TabsContent>

@@ -137,24 +137,7 @@ export default function KanbanPage() {
     api
       .getOrg()
       .then(async (data: OrgData) => {
-        const details = await Promise.all(
-          data.employees.map(async (name) => {
-            try {
-              return await api.getEmployee(name)
-            } catch {
-              return {
-                name,
-                displayName: name,
-                department: '',
-                rank: 'employee' as const,
-                engine: 'unknown',
-                model: 'unknown',
-                persona: '',
-              }
-            }
-          }),
-        )
-        setEmployees(details)
+        setEmployees(data.employees)
         setDepartments(data.departments)
 
         // Load board tickets from all departments

@@ -10,11 +10,12 @@ import {
 } from "@xyflow/react"
 import { useCallback, useEffect } from "react"
 import dagre from "@dagrejs/dagre"
-import type { Employee } from "@/lib/api"
+import type { Employee, OrgHierarchy } from "@/lib/api"
 import { nodeTypes } from "@/components/org/employee-node"
 
 interface OrgMapProps {
   employees: Employee[]
+  hierarchy?: OrgHierarchy
   selectedName: string | null
   onNodeClick: (employee: Employee) => void
 }
@@ -281,24 +282,224 @@ function buildDepartmentLayout(
   return { nodes, edges }
 }
 
+// ── Build layout from hierarchy tree ──────────────────────────
+
+function buildHierarchyLayout(
+  employees: Employee[],
+  hierarchy: OrgHierarchy,
+  selectedName: string | null,
+): { nodes: Node[]; edges: Edge[] } {
+  if (employees.length === 0) return { nodes: [], edges: [] }
+
+  const executive = employees.find((e) => e.rank === "executive")
+
+  // Compute selected chain for highlighting
+  const highlightedNames = new Set<string>()
+  if (selectedName) {
+    const selectedEmp = employees.find((e) => e.name === selectedName)
+    if (selectedEmp?.chain) {
+      for (const name of selectedEmp.chain) highlightedNames.add(name)
+    }
+    function addDescendants(name: string) {
+      highlightedNames.add(name)
+      const emp = employees.find((e) => e.name === name)
+      if (emp?.directReports) {
+        for (const child of emp.directReports) addDescendants(child)
+      }
+    }
+    addDescendants(selectedName)
+  }
+
+  // Include executive in node list (it's injected client-side, not in hierarchy.sorted)
+  const nodeIds = [...hierarchy.sorted]
+  if (executive && !nodeIds.includes(executive.name)) {
+    nodeIds.unshift(executive.name)
+  }
+
+  const edgePairs: [string, string][] = []
+  const hasParent = new Set<string>()
+
+  for (const name of hierarchy.sorted) {
+    const emp = employees.find((e) => e.name === name)
+    if (emp?.parentName && nodeIds.includes(emp.parentName)) {
+      edgePairs.push([emp.parentName, name])
+      hasParent.add(name)
+    }
+  }
+
+  // Connect top-level nodes (no parent in hierarchy) to executive
+  if (executive) {
+    for (const name of hierarchy.sorted) {
+      if (!hasParent.has(name) && name !== executive.name) {
+        edgePairs.push([executive.name, name])
+      }
+    }
+  }
+
+  const positions = dagreLayout(nodeIds, edgePairs, { nodesep: 80, ranksep: 120 })
+
+  // ── Resolve department bounding-box overlaps ─────────────
+  const deptNodes = new Map<string, string[]>()
+  for (const name of nodeIds) {
+    const emp = employees.find((e) => e.name === name)
+    if (!emp?.department) continue
+    const list = deptNodes.get(emp.department) ?? []
+    list.push(name)
+    deptNodes.set(emp.department, list)
+  }
+
+  function computeDeptBounds() {
+    const bounds = new Map<
+      string,
+      { minX: number; maxX: number; minY: number; maxY: number }
+    >()
+    for (const [dept, names] of deptNodes) {
+      let minX = Infinity,
+        maxX = -Infinity,
+        minY = Infinity,
+        maxY = -Infinity
+      for (const name of names) {
+        const pos = positions.get(name)
+        if (!pos) continue
+        minX = Math.min(minX, pos.x)
+        maxX = Math.max(maxX, pos.x + NODE_W)
+        minY = Math.min(minY, pos.y)
+        maxY = Math.max(maxY, pos.y + NODE_H)
+      }
+      if (minX !== Infinity) bounds.set(dept, { minX, maxX, minY, maxY })
+    }
+    return bounds
+  }
+
+  // Sort departments left-to-right, then shift any that overlap
+  const initialBounds = computeDeptBounds()
+  const sortedDepts = [...initialBounds.entries()].sort(
+    (a, b) => a[1].minX - b[1].minX,
+  )
+
+  for (let i = 1; i < sortedDepts.length; i++) {
+    const prevBounds = sortedDepts[i - 1][1]
+    const currBounds = sortedDepts[i][1]
+
+    const prevRight = prevBounds.maxX + GROUP_PAD_X
+    const currLeft = currBounds.minX - GROUP_PAD_X
+
+    if (currLeft < prevRight + COL_GAP) {
+      const shift = prevRight + COL_GAP - currLeft
+
+      // Shift this and all subsequent departments to the right
+      for (let j = i; j < sortedDepts.length; j++) {
+        const dept = sortedDepts[j][0]
+        for (const name of deptNodes.get(dept) ?? []) {
+          const pos = positions.get(name)
+          if (pos) pos.x += shift
+        }
+        sortedDepts[j][1].minX += shift
+        sortedDepts[j][1].maxX += shift
+      }
+    }
+  }
+
+  // Re-center executive above all content
+  if (executive) {
+    const execPos = positions.get(executive.name)
+    if (execPos) {
+      let minX = Infinity,
+        maxX = -Infinity
+      for (const [name, pos] of positions) {
+        if (name === executive.name) continue
+        minX = Math.min(minX, pos.x)
+        maxX = Math.max(maxX, pos.x + NODE_W)
+      }
+      if (minX !== Infinity) {
+        execPos.x = (minX + maxX) / 2 - NODE_W / 2
+      }
+    }
+  }
+
+  // Recompute bounds after overlap resolution
+  const deptBounds = computeDeptBounds()
+
+  const rfNodes: Node[] = []
+
+  // Department group overlays
+  let gi = 0
+  for (const [dept, bounds] of deptBounds) {
+    rfNodes.push({
+      id: `group-${gi}`,
+      type: "departmentGroup",
+      data: { label: dept },
+      position: {
+        x: bounds.minX - GROUP_PAD_X,
+        y: bounds.minY - GROUP_PAD_TOP,
+      },
+      style: {
+        width: bounds.maxX - bounds.minX + GROUP_PAD_X * 2,
+        height: bounds.maxY - bounds.minY + GROUP_PAD_TOP + GROUP_PAD_BOTTOM,
+        background: "var(--fill-quaternary)",
+        borderRadius: 12,
+        border: "1px solid var(--separator)",
+        padding: 0,
+      },
+      selectable: false,
+      draggable: false,
+    })
+    gi++
+  }
+
+  // Employee nodes
+  for (const name of nodeIds) {
+    const pos = positions.get(name)
+    const emp = employees.find((e) => e.name === name)
+    if (!pos || !emp) continue
+    rfNodes.push({
+      id: name,
+      type: "employeeNode",
+      data: emp as unknown as Record<string, unknown>,
+      position: { x: pos.x, y: pos.y },
+      selected: name === selectedName,
+    })
+  }
+
+  // Edges
+  const rfEdges: Edge[] = []
+  for (const [source, target] of edgePairs) {
+    const isHighlighted = highlightedNames.has(source) && highlightedNames.has(target)
+    rfEdges.push({
+      id: `${source}-${target}`,
+      source,
+      target,
+      type: "smoothstep",
+      style: {
+        stroke: isHighlighted ? "var(--accent)" : "var(--text-quaternary)",
+        strokeWidth: isHighlighted ? 2.5 : 1.5,
+        opacity: isHighlighted ? 1 : 0.7,
+      },
+      animated: isHighlighted,
+    })
+  }
+
+  return { nodes: rfNodes, edges: rfEdges }
+}
+
 // ── Component ──────────────────────────────────────────────────
 
-export function OrgMap({ employees, selectedName, onNodeClick }: OrgMapProps) {
-  const { nodes: initialNodes, edges: initialEdges } = buildDepartmentLayout(
-    employees,
-    selectedName,
-  )
+export function OrgMap({ employees, hierarchy, selectedName, onNodeClick }: OrgMapProps) {
+  const buildLayout = useCallback(() => {
+    return hierarchy
+      ? buildHierarchyLayout(employees, hierarchy, selectedName)
+      : buildDepartmentLayout(employees, selectedName)
+  }, [employees, hierarchy, selectedName])
+
+  const { nodes: initialNodes, edges: initialEdges } = buildLayout()
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
 
   useEffect(() => {
-    const { nodes: n, edges: e } = buildDepartmentLayout(
-      employees,
-      selectedName,
-    )
+    const { nodes: n, edges: e } = buildLayout()
     setNodes(n)
     setEdges(e)
-  }, [employees, selectedName, setNodes, setEdges])
+  }, [buildLayout, setNodes, setEdges])
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {

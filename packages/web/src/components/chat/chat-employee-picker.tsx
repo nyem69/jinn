@@ -38,9 +38,9 @@ export function ChatEmployeePicker({
     const q = search.toLowerCase()
     return employees.filter(
       e =>
-        e.name.toLowerCase().includes(q) ||
-        e.displayName.toLowerCase().includes(q) ||
-        e.department.toLowerCase().includes(q)
+        e.name?.toLowerCase().includes(q) ||
+        e.displayName?.toLowerCase().includes(q) ||
+        e.department?.toLowerCase().includes(q)
     )
   }, [employees, search])
 

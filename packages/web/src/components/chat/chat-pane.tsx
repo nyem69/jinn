@@ -80,25 +80,17 @@ export function ChatPane({
   const [pickerEmployees, setPickerEmployees] = useState<Pick<Employee, 'name' | 'displayName' | 'department' | 'rank'>[]>([])
   const employeesFetchedRef = useRef(false)
 
-  // TODO: Replace N+1 getEmployee calls with a single bulk endpoint (e.g. GET /api/org/employees)
-  // Currently fetches getOrg() + getEmployee(name) for each employee. Cached after first load
-  // so it only fires once per page lifecycle, but a bulk endpoint would be cleaner.
   useEffect(() => {
     if (sessionId) return // Only fetch when no active session
     if (employeesFetchedRef.current && pickerEmployees.length > 0) return // Use cached result
-    api.getOrg().then(async (data) => {
+    api.getOrg().then((data) => {
       if (!Array.isArray(data.employees)) return
-      const details = await Promise.all(
-        data.employees.map(async (name: string) => {
-          try {
-            const emp = await api.getEmployee(name)
-            return { name: emp.name, displayName: emp.displayName, department: emp.department, rank: emp.rank }
-          } catch {
-            return { name, displayName: name, department: '', rank: 'employee' as const }
-          }
-        })
-      )
-      setPickerEmployees(details)
+      setPickerEmployees(data.employees.map((emp) => ({
+        name: emp.name,
+        displayName: emp.displayName,
+        department: emp.department,
+        rank: emp.rank,
+      })))
       employeesFetchedRef.current = true
     }).catch(() => {})
   }, [sessionId, pickerEmployees.length])

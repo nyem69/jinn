@@ -17,8 +17,8 @@ export function EmployeeAvatar({
   onClick,
 }: EmployeeAvatarProps) {
   const { settings } = useSettings()
-  const override = settings.employeeOverrides[name]
-  const emoji = override?.emoji || emojiForName(name)
+  const override = name ? settings.employeeOverrides[name] : undefined
+  const emoji = override?.emoji || emojiForName(name || '')
   const fontSize = Math.round(size * 0.6)
 
   return (

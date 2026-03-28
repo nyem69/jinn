@@ -326,16 +326,11 @@ export function ChatSidebar({
 
   // Fetch employee display names from org API
   useEffect(() => {
-    api.getOrg().then(async (org) => {
+    api.getOrg().then((org) => {
       const map = new Map<string, Employee>()
-      await Promise.all(
-        org.employees.map(async (name: string) => {
-          try {
-            const emp = await api.getEmployee(name)
-            map.set(name, emp)
-          } catch { /* skip */ }
-        }),
-      )
+      for (const emp of org.employees) {
+        map.set(emp.name, emp)
+      }
       setEmployeeData(map)
     }).catch(() => { /* best-effort */ })
   }, [])

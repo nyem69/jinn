@@ -73,6 +73,22 @@ function stampVersion(version: string): void {
   fs.writeFileSync(CONFIG_PATH, yaml.dump(config, { lineWidth: -1 }), "utf-8");
 }
 
+/**
+ * Build engine-specific CLI args for running a one-shot migration prompt.
+ * Each engine CLI uses different flags for prompt input.
+ */
+function buildMigrateArgs(engine: string, prompt: string): string[] {
+  switch (engine) {
+    case "codex":
+      return ["exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", prompt];
+    case "gemini":
+      return ["--yolo", prompt];
+    case "claude":
+    default:
+      return ["-p", "--dangerously-skip-permissions", prompt];
+  }
+}
+
 export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Promise<void> {
   // Ensure instance exists
   if (!fs.existsSync(JINN_HOME)) {
@@ -152,7 +168,8 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
   console.log(`\nLaunching AI to apply ${pending.length} migration(s)...\n`);
 
   const config = loadConfig();
-  const engineConfig = config.engines[config.engines.default] ?? config.engines.claude;
+  const defaultEngine = config.engines.default ?? "claude";
+  const engineConfig = config.engines[defaultEngine] ?? config.engines.claude;
 
   try {
     const prompt = [
@@ -167,7 +184,10 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
       `Clean up the migrations/ directory when done.`,
     ].join("\n");
 
-    execFileSync(engineConfig.bin, ["-p", prompt], {
+    const args = buildMigrateArgs(defaultEngine, prompt);
+    console.log(`${DIM}Engine: ${defaultEngine} (${engineConfig.bin})${RESET}\n`);
+
+    execFileSync(engineConfig.bin, args, {
       stdio: "inherit",
       cwd: JINN_HOME,
     });

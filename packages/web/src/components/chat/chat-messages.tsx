@@ -85,18 +85,19 @@ function ToolGroup({ msgs, isActive }: { msgs: Message[]; isActive: boolean }) {
 
 function inlineFormat(text: string): React.ReactNode {
   const parts: React.ReactNode[] = []
-  // URLs, bold, inline code, italic — in priority order
-  const regex = /(https?:\/\/[^\s<]+[^\s<.,;:!?)}\]'"])|(\*\*(.+?)\*\*)|(`([^`]+)`)|\*([^*]+)\*/g
+  // Markdown links (any href), bare URLs, bold, inline code, italic — in priority order
+  const regex = /\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<]+[^\s<.,;:!?)}\]'"])|(\*\*(.+?)\*\*)|(`([^`]+)`)|\*([^*]+)\*/g
   let last = 0
   let match
 
   while ((match = regex.exec(text)) !== null) {
     if (match.index > last) parts.push(text.slice(last, match.index))
-    if (match[1]) {
+    if (match[1] && match[2]) {
+      // Markdown link: [text](url)
       parts.push(
         <a
           key={match.index}
-          href={match[1]}
+          href={match[2]}
           target="_blank"
           rel="noopener noreferrer"
           className="text-[var(--system-blue)] underline underline-offset-2"
@@ -104,14 +105,27 @@ function inlineFormat(text: string): React.ReactNode {
           {match[1]}
         </a>
       )
-    } else if (match[2]) {
-      parts.push(<strong key={match.index} className="font-[var(--weight-bold)]">{match[3]}</strong>)
-    } else if (match[4]) {
+    } else if (match[3]) {
+      // Bare URL
       parts.push(
-        <code key={match.index} className="bg-[var(--fill-secondary)] border border-[var(--separator)] rounded-[5px] py-px px-[5px] text-[0.88em] font-['SF_Mono',Menlo,monospace] text-[var(--accent)]">{match[5]}</code>
+        <a
+          key={match.index}
+          href={match[3]}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[var(--system-blue)] underline underline-offset-2"
+        >
+          {match[3]}
+        </a>
       )
+    } else if (match[4]) {
+      parts.push(<strong key={match.index} className="font-[var(--weight-bold)]">{match[5]}</strong>)
     } else if (match[6]) {
-      parts.push(<em key={match.index} className="italic opacity-[0.85]">{match[6]}</em>)
+      parts.push(
+        <code key={match.index} className="bg-[var(--fill-secondary)] border border-[var(--separator)] rounded-[5px] py-px px-[5px] text-[0.88em] font-['SF_Mono',Menlo,monospace] text-[var(--accent)]">{match[7]}</code>
+      )
+    } else if (match[8]) {
+      parts.push(<em key={match.index} className="italic opacity-[0.85]">{match[8]}</em>)
     }
     last = match.index + match[0].length
   }

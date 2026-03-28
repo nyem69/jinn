@@ -102,6 +102,8 @@ export interface Connector {
   editMessage(target: Target, text: string): Promise<void>;
   setTypingStatus?(channelId: string, threadTs: string | undefined, status: string): Promise<void>;
   onMessage(handler: (msg: IncomingMessage) => void): void;
+  /** Return the bound employee name, if any */
+  getEmployee?(): string | undefined;
 }
 
 export interface IncomingMessage {
@@ -214,6 +216,50 @@ export interface Employee {
   effortLevel?: string;
   /** Whether to notify the parent session when this employee's child session completes. Default: true */
   alwaysNotify?: boolean;
+  /** Who this employee reports to. String = single parent. Array = primary + dotted-line (future). */
+  reportsTo?: string | string[];
+  /** Services this employee provides to the org */
+  provides?: ServiceDeclaration[];
+}
+
+/** A service that an employee can provide to other employees/departments. */
+export interface ServiceDeclaration {
+  name: string;
+  description: string;
+}
+
+/** A node in the resolved org tree. Wraps an Employee with computed hierarchy data. */
+export interface OrgNode {
+  employee: Employee;
+  /** Resolved primary parent name (null = reports to root) */
+  parentName: string | null;
+  /** Names of direct reports */
+  directReports: string[];
+  /** Depth in tree (root = 0, root's reports = 1, etc.) */
+  depth: number;
+  /** Path from root to this node (excluding virtual root), e.g. ["pravko-lead", "pravko-writer"] */
+  chain: string[];
+}
+
+/** Warning about a hierarchy issue. */
+export interface OrgWarning {
+  employee: string;
+  type: "broken_ref" | "cycle" | "self_ref" | "cross_department" | "multiple_executives";
+  message: string;
+  /** The invalid reportsTo value that caused this warning */
+  ref?: string;
+}
+
+/** The fully resolved org hierarchy. */
+export interface OrgHierarchy {
+  /** Root node name — executive employee name, or null if no executive YAML exists */
+  root: string | null;
+  /** All nodes keyed by employee name */
+  nodes: Record<string, OrgNode>;
+  /** Ordered list for flat iteration (topological/BFS order, root first) */
+  sorted: string[];
+  /** Any resolution warnings */
+  warnings: OrgWarning[];
 }
 
 export interface Department {
@@ -268,6 +314,10 @@ export interface McpGlobalConfig {
 export interface WebConnectorConfig {}
 
 export interface SlackConnectorConfig {
+  /** Unique instance identifier (e.g. "slack-support") */
+  id?: string;
+  /** Employee to handle messages from this connector instance */
+  employee?: string;
   appToken: string;
   botToken: string;
   allowFrom?: string | string[];
@@ -275,6 +325,10 @@ export interface SlackConnectorConfig {
 }
 
 export interface DiscordConnectorConfig {
+  /** Unique instance identifier (e.g. "discord-vox") */
+  id?: string;
+  /** Employee to handle messages from this connector instance */
+  employee?: string;
   botToken?: string;       // Make optional — not needed in proxy mode
   allowFrom?: string | string[];
   ignoreOldMessagesOnBoot?: boolean;
@@ -294,11 +348,26 @@ export interface TelegramConnectorConfig {
 }
 
 export interface WhatsAppConnectorConfig {
+  /** Unique instance identifier (e.g. "whatsapp-main") */
+  id?: string;
+  /** Employee to handle messages from this connector instance */
+  employee?: string;
   /** Where to store session credentials (default: JINN_HOME/.whatsapp-auth) */
   authDir?: string;
   /** Allowed phone numbers in JID format (e.g. "447700900000@s.whatsapp.net") — empty = allow all */
   allowFrom?: string[];
   ignoreOldMessagesOnBoot?: boolean;
+}
+
+export interface ConnectorInstance {
+  /** Unique instance ID */
+  id: string;
+  /** Connector type */
+  type: "discord" | "discord-remote" | "slack" | "whatsapp" | "telegram";
+  /** Employee to bind to this connector */
+  employee?: string;
+  /** Type-specific configuration */
+  [key: string]: unknown;
 }
 
 export interface PortalConfig {
@@ -323,6 +392,8 @@ export interface JinnConfig {
     telegram?: TelegramConnectorConfig;
     discord?: DiscordConnectorConfig;
     whatsapp?: WhatsAppConnectorConfig;
+    /** Named connector instances — allows multiple connectors of the same type */
+    instances?: ConnectorInstance[];
   };
   logging: { file: boolean; stdout: boolean; level: string };
   mcp?: McpGlobalConfig;

@@ -29,11 +29,30 @@ export interface Employee {
   persona: string;
   emoji?: string;
   alwaysNotify?: boolean;
+  reportsTo?: string | string[];
+  parentName?: string | null;
+  directReports?: string[];
+  depth?: number;
+  chain?: string[];
+}
+
+export interface OrgWarning {
+  employee: string;
+  type: string;
+  message: string;
+  ref?: string;
+}
+
+export interface OrgHierarchy {
+  root: string | null;
+  sorted: string[];
+  warnings: OrgWarning[];
 }
 
 export interface OrgData {
   departments: string[];
-  employees: string[];
+  employees: Employee[];
+  hierarchy: OrgHierarchy;
 }
 
 const BASE =
@@ -138,6 +157,8 @@ export const api = {
   getSkills: () => get<Record<string, unknown>[]>("/api/skills"),
   getSkill: (name: string) => get<Record<string, unknown>>(`/api/skills/${name}`),
   getConfig: () => get<Record<string, unknown>>("/api/config"),
+  reloadConnectors: () =>
+    post<{ started: string[]; stopped: string[]; errors: string[] }>("/api/connectors/reload", {}),
   updateConfig: (data: Record<string, unknown>) =>
     put<Record<string, unknown>>("/api/config", data),
   getLogs: (n?: number) =>

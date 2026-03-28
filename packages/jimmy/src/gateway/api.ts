@@ -62,6 +62,7 @@ export interface ApiContext {
   getConfig: () => JinnConfig;
   emit: (event: string, payload: unknown) => void;
   connectors: Map<string, import("../shared/types.js").Connector>;
+  reloadConnectorInstances?: () => Promise<{ started: string[]; stopped: string[]; errors: string[] }>;
 }
 
 export function resumePendingWebQueueItems(context: ApiContext): void {
@@ -248,12 +249,33 @@ function serverError(res: ServerResponse, message: string): void {
   json(res, { error: message }, 500);
 }
 
+const SANITIZED_KEYS = new Set(["token", "botToken", "signingSecret", "appToken"]);
+
 function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
   const result = { ...target };
   for (const key of Object.keys(source)) {
     const sv = source[key];
     const tv = target[key];
-    if (sv && typeof sv === "object" && !Array.isArray(sv) && tv && typeof tv === "object" && !Array.isArray(tv)) {
+    // Skip sanitized secret placeholders — keep original value
+    if (SANITIZED_KEYS.has(key) && sv === "***") continue;
+    if (Array.isArray(sv)) {
+      // For arrays (e.g. instances), preserve secrets from matching items
+      if (Array.isArray(tv)) {
+        result[key] = sv.map((item: unknown) => {
+          if (item && typeof item === "object" && !Array.isArray(item)) {
+            const srcItem = item as Record<string, unknown>;
+            // Find matching target item by id
+            const matchTarget = (tv as unknown[]).find(
+              (t) => t && typeof t === "object" && (t as Record<string, unknown>).id === srcItem.id
+            ) as Record<string, unknown> | undefined;
+            if (matchTarget) return deepMerge(matchTarget, srcItem);
+          }
+          return item;
+        });
+      } else {
+        result[key] = sv;
+      }
+    } else if (sv && typeof sv === "object" && !Array.isArray(sv) && tv && typeof tv === "object" && !Array.isArray(tv)) {
       result[key] = deepMerge(tv as Record<string, unknown>, sv as Record<string, unknown>);
     } else {
       result[key] = sv;
@@ -891,62 +913,60 @@ export async function handleApiRequest(
 
     // GET /api/org
     if (method === "GET" && pathname === "/api/org") {
-      if (!fs.existsSync(ORG_DIR)) return json(res, { departments: [], employees: [] });
+      if (!fs.existsSync(ORG_DIR)) return json(res, { departments: [], employees: [], hierarchy: { root: null, sorted: [], warnings: [] } });
       const entries = fs.readdirSync(ORG_DIR, { withFileTypes: true });
       const departments = entries
         .filter((e) => e.isDirectory())
         .map((e) => e.name);
-      const employees: string[] = [];
-      // Scan root-level YAML files
-      for (const e of entries) {
-        if (e.isFile() && (e.name.endsWith(".yaml") || e.name.endsWith(".yml"))) {
-          employees.push(e.name.replace(/\.ya?ml$/, ""));
-        }
-      }
-      // Scan employees/ subdirectory
-      const employeesDir = path.join(ORG_DIR, "employees");
-      if (fs.existsSync(employeesDir)) {
-        const empEntries = fs.readdirSync(employeesDir, { withFileTypes: true });
-        for (const e of empEntries) {
-          if (e.isFile() && (e.name.endsWith(".yaml") || e.name.endsWith(".yml"))) {
-            employees.push(e.name.replace(/\.ya?ml$/, ""));
-          }
-        }
-      }
-      // Scan inside each department directory for YAML files (excluding department.yaml)
-      for (const dept of departments) {
-        const deptDir = path.join(ORG_DIR, dept);
-        const deptEntries = fs.readdirSync(deptDir, { withFileTypes: true });
-        for (const e of deptEntries) {
-          if (e.isFile() && (e.name.endsWith(".yaml") || e.name.endsWith(".yml")) && e.name !== "department.yaml") {
-            employees.push(e.name.replace(/\.ya?ml$/, ""));
-          }
-        }
-      }
-      return json(res, { departments, employees });
+
+      const { scanOrg } = await import("./org.js");
+      const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+      const orgRegistry = scanOrg();
+      const hierarchy = resolveOrgHierarchy(orgRegistry);
+
+      const employees = hierarchy.sorted.map((name) => {
+        const node = hierarchy.nodes[name];
+        const emp = node.employee;
+        const { persona, ...rest } = emp;
+        return {
+          ...rest,
+          parentName: node.parentName,
+          directReports: node.directReports,
+          depth: node.depth,
+          chain: node.chain,
+        };
+      });
+
+      return json(res, {
+        departments,
+        employees,
+        hierarchy: {
+          root: hierarchy.root,
+          sorted: hierarchy.sorted,
+          warnings: hierarchy.warnings,
+        },
+      });
     }
 
     // GET /api/org/employees/:name
     params = matchRoute("/api/org/employees/:name", pathname);
     if (method === "GET" && params) {
-      const candidates = [
-        path.join(ORG_DIR, "employees", `${params.name}.yaml`),
-        path.join(ORG_DIR, "employees", `${params.name}.yml`),
-        path.join(ORG_DIR, `${params.name}.yaml`),
-        path.join(ORG_DIR, `${params.name}.yml`),
-      ];
-      // Also search inside each department directory
-      if (fs.existsSync(ORG_DIR)) {
-        const dirs = fs.readdirSync(ORG_DIR, { withFileTypes: true }).filter((e) => e.isDirectory());
-        for (const dir of dirs) {
-          candidates.push(path.join(ORG_DIR, dir.name, `${params.name}.yaml`));
-          candidates.push(path.join(ORG_DIR, dir.name, `${params.name}.yml`));
-        }
-      }
-      const filePath = candidates.find((c) => fs.existsSync(c));
-      if (!filePath) return notFound(res);
-      const content = yaml.load(fs.readFileSync(filePath, "utf-8"));
-      return json(res, content);
+      const { scanOrg } = await import("./org.js");
+      const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+      const orgRegistry = scanOrg();
+      const emp = orgRegistry.get(params.name);
+      if (!emp) return notFound(res);
+
+      const hierarchy = resolveOrgHierarchy(orgRegistry);
+      const node = hierarchy.nodes[params.name];
+
+      return json(res, {
+        ...emp,
+        parentName: node?.parentName ?? null,
+        directReports: node?.directReports ?? [],
+        depth: node?.depth ?? 0,
+        chain: node?.chain ?? [params.name],
+      });
     }
 
     // PATCH /api/org/employees/:name — update employee fields (currently only alwaysNotify)
@@ -962,6 +982,95 @@ export async function handleApiRequest(
       if (!updated) return notFound(res);
       context.emit("org:updated", { employee: params.name });
       return json(res, { status: "ok" });
+    }
+
+    // GET /api/org/services — list all cross-department services
+    if (method === "GET" && pathname === "/api/org/services") {
+      const { scanOrg } = await import("./org.js");
+      const { buildServiceRegistry } = await import("./services.js");
+      const orgRegistry = scanOrg();
+      const services = buildServiceRegistry(orgRegistry);
+      const result = Array.from(services.values()).map((entry) => ({
+        name: entry.declaration.name,
+        description: entry.declaration.description,
+        provider: {
+          name: entry.provider.name,
+          displayName: entry.provider.displayName,
+          department: entry.provider.department,
+          rank: entry.provider.rank,
+        },
+      }));
+      return json(res, { services: result });
+    }
+
+    // POST /api/org/cross-request — route a service request to the provider
+    if (method === "POST" && pathname === "/api/org/cross-request") {
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      const body = parsed.body as any;
+      const { fromEmployee, service, prompt, parentSessionId } = body;
+      if (!fromEmployee || !service || !prompt) {
+        return badRequest(res, "Missing required fields: fromEmployee, service, prompt");
+      }
+
+      const { scanOrg } = await import("./org.js");
+      const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+      const { buildServiceRegistry, buildRoutePath, resolveManagerChain } = await import("./services.js");
+
+      const orgRegistry = scanOrg();
+      const requester = orgRegistry.get(fromEmployee);
+      if (!requester) return notFound(res);
+
+      const services = buildServiceRegistry(orgRegistry);
+      const entry = services.get(service);
+      if (!entry) {
+        return json(res, { error: `Service "${service}" not found` }, 404);
+      }
+
+      const hierarchy = resolveOrgHierarchy(orgRegistry);
+      const route = buildRoutePath(fromEmployee, entry.provider.name, hierarchy);
+      const managers = resolveManagerChain(route, hierarchy);
+
+      const crossBrief = `## Cross-service request
+
+**From**: ${requester.displayName} (${requester.department})
+**Service**: ${service} — ${entry.declaration.description}
+
+### Request
+${prompt}
+
+---
+Handle this as a priority request from a colleague.`;
+
+      const config = context.getConfig();
+      const session = createSession({
+        engine: entry.provider.engine || config.engines.default,
+        model: entry.provider.model || undefined,
+        source: "cross-request",
+        sourceRef: `cross:${fromEmployee}:${service}`,
+        connector: "web",
+        sessionKey: `cross:${Date.now()}`,
+        replyContext: { source: "cross-request" },
+        employee: entry.provider.name,
+        parentSessionId: parentSessionId || undefined,
+        prompt: crossBrief,
+        portalName: config.portal?.portalName,
+        title: `Cross-request: ${fromEmployee} → ${service}`,
+      });
+      insertMessage(session.id, "user", crossBrief);
+      logger.info(`Cross-request session created: ${session.id} (${fromEmployee} → ${service} → ${entry.provider.name})`);
+
+      return json(res, {
+        sessionId: session.id,
+        provider: {
+          name: entry.provider.name,
+          displayName: entry.provider.displayName,
+          department: entry.provider.department,
+        },
+        route,
+        managers: managers.map((m) => m.employee.name),
+        service,
+      }, 201);
     }
 
     // GET /api/org/departments/:name/board
@@ -1122,20 +1231,32 @@ export async function handleApiRequest(
     if (method === "GET" && pathname === "/api/config") {
       const config = context.getConfig();
       // Sanitize: remove any secrets/tokens from connectors
+      const rawConnectors = config.connectors || {};
+      const sanitizedConnectors: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(rawConnectors)) {
+        if (k === "instances" && Array.isArray(v)) {
+          sanitizedConnectors.instances = v.map((inst: any) => ({
+            ...inst,
+            token: inst?.token ? "***" : undefined,
+            signingSecret: inst?.signingSecret ? "***" : undefined,
+            botToken: inst?.botToken ? "***" : undefined,
+            appToken: inst?.appToken ? "***" : undefined,
+          }));
+        } else if (v && typeof v === "object") {
+          sanitizedConnectors[k] = {
+            ...v,
+            token: (v as any)?.token ? "***" : undefined,
+            signingSecret: (v as any)?.signingSecret ? "***" : undefined,
+            botToken: (v as any)?.botToken ? "***" : undefined,
+            appToken: (v as any)?.appToken ? "***" : undefined,
+          };
+        } else {
+          sanitizedConnectors[k] = v;
+        }
+      }
       const sanitized = {
         ...config,
-        connectors: Object.fromEntries(
-          Object.entries(config.connectors || {}).map(([k, v]) => [
-            k,
-            {
-              ...v,
-              token: v?.token ? "***" : undefined,
-              signingSecret: v?.signingSecret ? "***" : undefined,
-              botToken: v?.botToken ? "***" : undefined,
-              appToken: v?.appToken ? "***" : undefined,
-            },
-          ]),
-        ),
+        connectors: sanitizedConnectors,
       };
       return json(res, sanitized);
     }
@@ -1215,9 +1336,26 @@ export async function handleApiRequest(
       return json(res, { lines });
     }
 
-    // POST /api/connectors/discord/incoming — receive proxied Discord messages from primary instance
-    if (method === "POST" && pathname === "/api/connectors/discord/incoming") {
-      const connector = context.connectors.get("discord");
+    // POST /api/connectors/reload — stop all instance connectors and restart from config
+    if (method === "POST" && pathname === "/api/connectors/reload") {
+      if (!context.reloadConnectorInstances) {
+        return json(res, { error: "Connector reload not available" }, 501);
+      }
+      try {
+        const result = await context.reloadConnectorInstances();
+        context.emit("connectors:reloaded", result);
+        return json(res, result);
+      } catch (err) {
+        return json(res, { error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    }
+
+    // POST /api/connectors/:id/incoming — receive proxied Discord messages from primary instance
+    // Supports both the legacy /api/connectors/discord/incoming and named instance ids
+    params = matchRoute("/api/connectors/:id/incoming", pathname);
+    if (method === "POST" && params && params.id) {
+      // Try the exact instance id first, then fall back to "discord" for the legacy path
+      const connector = context.connectors.get(params.id) ?? (params.id === "discord" ? context.connectors.get("discord") : undefined);
       if (!connector) return notFound(res);
       if (!("deliverMessage" in connector)) {
         return json(res, { error: "Discord connector is not in remote mode" }, 400);
@@ -1245,7 +1383,7 @@ export async function handleApiRequest(
       );
 
       const incomingMsg: IncomingMessage = {
-        connector: "discord",
+        connector: params.id,
         source: "discord",
         sessionKey: body.sessionKey,
         channel: body.channel,
@@ -1265,9 +1403,11 @@ export async function handleApiRequest(
       return json(res, { status: "delivered" });
     }
 
-    // POST /api/connectors/discord/proxy — proxy connector operations from remote instances
-    if (method === "POST" && pathname === "/api/connectors/discord/proxy") {
-      const connector = context.connectors.get("discord");
+    // POST /api/connectors/:id/proxy — proxy connector operations from remote instances
+    // Supports both the legacy /api/connectors/discord/proxy and named instance ids
+    params = matchRoute("/api/connectors/:id/proxy", pathname);
+    if (method === "POST" && params && params.id) {
+      const connector = context.connectors.get(params.id) ?? (params.id === "discord" ? context.connectors.get("discord") : undefined);
       if (!connector) return notFound(res);
 
       const _parsed = await readJsonBody(req, res);
@@ -1341,8 +1481,10 @@ export async function handleApiRequest(
 
     // GET /api/connectors — list available connectors
     if (method === "GET" && pathname === "/api/connectors") {
-      const connectors = Array.from(context.connectors.values()).map((connector) => ({
+      const connectors = Array.from(context.connectors.entries()).map(([instanceId, connector]) => ({
         name: connector.name,
+        instanceId,
+        employee: connector.getEmployee?.() ?? undefined,
         ...connector.getHealth(),
       }));
       return json(res, connectors);
@@ -1908,6 +2050,10 @@ async function runWebSession(
     employee = findEmployee(currentSession.employee, registry);
   }
 
+  const { scanOrg: scanOrgForHierarchy } = await import("./org.js");
+  const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+  const orgHierarchy = resolveOrgHierarchy(scanOrgForHierarchy());
+
   try {
 
     const systemPrompt = buildContext({
@@ -1918,6 +2064,7 @@ async function runWebSession(
       connectors: Array.from(context.connectors.keys()),
       config,
       sessionId: currentSession.id,
+      hierarchy: orgHierarchy,
     });
 
     const engineConfig = currentSession.engine === "codex"

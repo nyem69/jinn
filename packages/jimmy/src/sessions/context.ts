@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Employee, JinnConfig } from "../shared/types.js";
 import { JINN_HOME, ORG_DIR, CRON_JOBS, DOCS_DIR } from "../shared/paths.js";
+import { scanOrg } from "../gateway/org.js";
+import { buildServiceRegistry } from "../gateway/services.js";
 
 /**
  * Token budget strategy:
@@ -54,6 +56,7 @@ export function buildContext(opts: {
   operatorName?: string;
   language?: string;
   channelName?: string;
+  hierarchy?: import("../shared/types.js").OrgHierarchy;
 }): string {
   const maxChars = opts.config?.context?.maxChars ?? DEFAULT_MAX_CONTEXT_CHARS;
   const sections: Section[] = [];
@@ -73,7 +76,13 @@ export function buildContext(opts: {
     sections.push({
       tier: Tier.ESSENTIAL,
       marker: "# You are",
-      content: buildEmployeeIdentity(opts.employee, portalName, language),
+      content: buildEmployeeIdentity(
+        opts.employee,
+        portalName,
+        language,
+        opts.hierarchy?.nodes[opts.employee.name],
+        opts.hierarchy,
+      ),
       summary: `# You are ${opts.employee.displayName}\nEmployee: ${opts.employee.name}, ${opts.employee.department}, ${opts.employee.rank}`,
     });
   } else {
@@ -114,7 +123,7 @@ export function buildContext(opts: {
   }
 
   // ── STANDARD: Organization ──────────────────────────────────
-  const orgCtx = buildOrgContext();
+  const orgCtx = buildOrgContext(opts.hierarchy);
   if (orgCtx) {
     sections.push({
       tier: Tier.STANDARD,
@@ -122,6 +131,19 @@ export function buildContext(opts: {
       content: orgCtx,
       summary: `## Organization\nEmployee files are in \`${ORG_DIR}/\`. Read them directly when needed.`,
     });
+  }
+
+  // ── STANDARD: Available services (for employees only) ────────
+  if (opts.employee) {
+    const svcCtx = buildServicesContext(opts.employee, gatewayUrl);
+    if (svcCtx) {
+      sections.push({
+        tier: Tier.STANDARD,
+        marker: "## Available services",
+        content: svcCtx,
+        summary: `## Available services\nUse \`POST ${gatewayUrl}/api/org/cross-request\` to request services from other employees.`,
+      });
+    }
   }
 
   // ── STANDARD: Cron jobs (only enabled, with disabled count) ─
@@ -203,10 +225,18 @@ export function buildContext(opts: {
 // Section builders
 // ═══════════════════════════════════════════════════════════════
 
-function buildEmployeeIdentity(employee: Employee, portalName: string, language: string): string {
+function buildEmployeeIdentity(
+  employee: Employee,
+  portalName: string,
+  language: string,
+  node?: import("../shared/types.js").OrgNode,
+  hierarchy?: import("../shared/types.js").OrgHierarchy,
+): string {
   const languageInstruction = language !== "English"
     ? `\n**Language**: Always respond in ${language}. All your communication with the user must be in ${language}.\n`
     : "";
+
+  const chainOfCommand = buildChainOfCommand(employee, portalName, node, hierarchy);
 
   return `# You are ${employee.displayName}
 
@@ -222,7 +252,7 @@ ${languageInstruction}
 - **Rank**: ${employee.rank}
 - **Engine**: ${employee.engine}
 - **Model**: ${employee.model}
-
+${chainOfCommand}
 ## System context
 You are part of the ${portalName} AI gateway — a system that orchestrates AI workers. You have access to the filesystem, can run commands, call APIs, and send messages via connectors. Your working directory is \`~/.jinn\` (${JINN_HOME}).
 
@@ -235,6 +265,81 @@ You can:
 - Collaborate with other employees by mentioning them or creating sessions
 
 Be proactive, take initiative, and deliver results. You're not a chatbot — you're a worker.`;
+}
+
+function buildChainOfCommand(
+  employee: Employee,
+  portalName: string,
+  node?: import("../shared/types.js").OrgNode,
+  hierarchy?: import("../shared/types.js").OrgHierarchy,
+): string {
+  if (!node || !hierarchy) return "";
+
+  const lines: string[] = ["## Chain of command"];
+  lines.push(`- **Department**: ${employee.department}`);
+
+  // Your manager
+  if (node.parentName) {
+    const parent = hierarchy.nodes[node.parentName];
+    if (parent) {
+      lines.push(`- **Your manager**: ${parent.employee.displayName} (${parent.employee.rank})`);
+    } else {
+      lines.push(`- **Your manager**: ${node.parentName}`);
+    }
+  } else {
+    lines.push(`- **Your manager**: ${portalName} (COO)`);
+  }
+
+  // Direct reports
+  if (node.directReports.length > 0) {
+    const reports = node.directReports.map((name) => {
+      const r = hierarchy.nodes[name];
+      return r ? `${r.employee.displayName} (${r.employee.rank})` : name;
+    });
+    lines.push(`- **Your direct reports**: ${reports.join(", ")}`);
+  }
+
+  // Escalation path
+  const escalation: string[] = [];
+  let current = node.parentName;
+  const visited = new Set<string>();
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const mgr = hierarchy.nodes[current];
+    escalation.push(mgr ? mgr.employee.displayName : current);
+    current = mgr?.parentName ?? null;
+  }
+  escalation.push(`${portalName} (COO)`);
+  const unique = [...new Set(escalation)];
+  lines.push(`- **Escalation path**: ${unique.join(" → ")}`);
+
+  return "\n" + lines.join("\n") + "\n";
+}
+
+function buildServicesContext(employee: Employee, gatewayUrl: string): string | null {
+  try {
+    const registry = scanOrg();
+    const services = buildServiceRegistry(registry);
+    if (services.size === 0) return null;
+
+    const lines: string[] = ["## Available services"];
+    lines.push("Other employees provide the following services. To request one, use the cross-request API:");
+    lines.push(`\`POST ${gatewayUrl}/api/org/cross-request\` with \`{"fromEmployee": "${employee.name}", "service": "<name>", "prompt": "<what you need>"}\``);
+    lines.push("");
+
+    for (const [svcName, entry] of services) {
+      // Skip services from own department
+      if (entry.provider.department === employee.department) continue;
+      lines.push(`- **${svcName}** — ${entry.declaration.description} (provided by ${entry.provider.displayName}, ${entry.provider.department})`);
+    }
+
+    // If no external services remain after filtering, skip
+    if (lines.length <= 4) return null;
+
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
 }
 
 function buildIdentity(portalName: string, operatorName?: string, language?: string): string {
@@ -316,8 +421,38 @@ function buildConfigContext(config: JinnConfig, gatewayUrl: string): string {
   return lines.join("\n");
 }
 
-function buildOrgContext(): string | null {
+function buildOrgContext(hierarchy?: import("../shared/types.js").OrgHierarchy): string | null {
   try {
+    if (hierarchy && Object.keys(hierarchy.nodes).length > 0) {
+      const MAX_DEPTH = 3;
+      const count = Object.keys(hierarchy.nodes).length;
+      const lines: string[] = [`## Organization (${count} employee(s))`];
+
+      let deepCount = 0;
+      for (const name of hierarchy.sorted) {
+        const node = hierarchy.nodes[name];
+        if (node.depth >= MAX_DEPTH) {
+          deepCount++;
+          continue;
+        }
+        const emp = node.employee;
+        const indent = "  ".repeat(node.depth);
+        let entry = `${indent}- **${emp.displayName}** (${name}) — ${emp.department}, ${emp.rank}`;
+        if (emp.persona) {
+          const firstLine = emp.persona.trim().split("\n")[0].trim().slice(0, 120);
+          entry += `\n${indent}  _${firstLine}_`;
+        }
+        lines.push(entry);
+      }
+      if (deepCount > 0) {
+        lines.push(`${"  ".repeat(MAX_DEPTH)}- ... and ${deepCount} more at deeper levels`);
+      }
+
+      lines.push(`\nYou can create new employees by writing YAML files to \`${ORG_DIR}/\``);
+      return lines.join("\n");
+    }
+
+    // Fallback: filesystem-based flat rendering (backwards compat)
     // Recursively collect all employee yaml files (skip department.yaml)
     const employeeFiles: { fullPath: string; name: string }[] = [];
 
