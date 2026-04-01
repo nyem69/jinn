@@ -61,6 +61,8 @@ When Claude Code gets better, Jinn gets better — automatically.
 - 🔗 **MCP support** — connect to any MCP server
 - ⏱️ **Session timeouts** — kill runaway sessions after configurable duration (global or per-employee)
 - 🤝 **Synchronous employee invocation** — `invoke_employee` MCP tool for inline sub-tasks
+- 🗜️ **Session compaction** — auto-summarize old messages when token count exceeds threshold
+- 🪝 **Hook pipeline** — pre/post session and tool observation hooks (shell or JS modules)
 
 ## 🚀 Quick Start
 
@@ -160,6 +162,56 @@ maxDurationMinutes: 10     # override global limit for this employee
 
 When a session exceeds its limit, the engine process is killed via SIGTERM. If the engine hasn't started yet (session queued), it is marked as interrupted directly.
 
+### Session Compaction
+
+Long-running sessions accumulate messages that can overflow transcript syncs and bloat API responses. Compaction automatically summarizes older messages when the estimated token count exceeds a threshold:
+
+```yaml
+sessions:
+  compaction:
+    enabled: true
+    maxEstimatedTokens: 50000    # trigger compaction above this
+    preserveRecentMessages: 6    # keep last N messages verbatim
+```
+
+Compacted messages are replaced with a single structured summary (role: `"summary"`) containing scope, recent user requests, key topics, pending work, and a timeline. Re-compaction merges with existing summaries. The `compacted_at` field on sessions tracks when compaction last ran.
+
+### Hook Pipeline
+
+Hooks provide observable middleware at session and tool-use boundaries. Define hooks in `config.yaml`:
+
+```yaml
+hooks:
+  preSession:              # before engine.run() — can modify prompt or abort
+    - type: shell
+      command: ./hooks/inject-context.sh
+      blocking: true
+      timeoutMs: 5000
+  postSession:             # after engine.run() — fire-and-forget
+    - type: module
+      path: ./hooks/cost-logger.mjs
+  onToolUse:               # when engine starts a tool — fire-and-forget
+    - type: module
+      path: ./hooks/tool-usage-tracker.mjs
+  onToolResult:            # when a tool finishes — fire-and-forget
+    - type: shell
+      command: ./hooks/audit.sh
+```
+
+**Hook types:**
+- `shell` — spawns a subprocess, pipes JSON payload to stdin, reads stdout. Exit 0 = allow, exit 2 = deny/abort.
+- `module` — dynamically imports a JS/TS module with a default async function export. Cached after first load.
+
+**Hook events:**
+| Event | Blocking? | Can modify? |
+|-------|-----------|-------------|
+| `preSession` | Optional | prompt, systemPrompt; can abort |
+| `postSession` | No | Read-only (cost, result, duration) |
+| `onToolUse` | No | Read-only (toolName, toolId) |
+| `onToolResult` | No | Read-only (toolName, toolId) |
+
+Fire-and-forget hooks are concurrency-limited (max 5 concurrent) and never crash the session on failure.
+
 ### Synchronous Employee Invocation
 
 The `invoke_employee` MCP tool lets employees call other employees inline and get the result back synchronously — useful for fact-checks, lookups, and data formatting without the complexity of async child sessions:
@@ -235,7 +287,7 @@ Jinn is under active development. Here's what's coming:
 ### 🧠 Engines
 - [x] **Gemini CLI** — Google's Gemini as a third engine option
 - [ ] **Local models** — Ollama / llama.cpp integration for offline use
-- [ ] **Engine fallback chains** — auto-failover when primary engine is unavailable
+- [x] **Engine fallback chains** — auto-failover to Codex when Claude is rate-limited
 
 ### 👥 Org System
 - [x] **Agent-to-agent messaging** — direct communication without board intermediary
@@ -248,11 +300,13 @@ Jinn is under active development. Here's what's coming:
 - [x] **Live streaming** — watch agent responses stream in real-time
 - [x] **File attachments** — drag & drop files into chat with engine passthrough
 - [ ] **Approval workflows** — approve/reject agent actions from the dashboard
-- [ ] **Cost analytics** — per-employee, per-department cost breakdowns
+- [x] **Cost analytics** — per-employee cost tracking via hook pipeline (`costs.jsonl`)
 
 ### 🛠️ Platform
 - [ ] **Plugin system** — installable plugins for common integrations (Stripe, Linear, GitHub)
 - [x] **Session timeouts** — configurable `maxDurationMinutes` per-employee or global
+- [x] **Session compaction** — auto-summarize old messages to bound context growth
+- [x] **Hook pipeline** — pre/post session and tool observation middleware
 - [ ] **REST API auth** — API keys for secure remote access
 - [ ] **Multi-user support** — team access with roles and permissions
 - [ ] **Docker image** — one-command deployment with `docker run`
