@@ -170,6 +170,7 @@ export function migrateSessionsSchema(database: Database.Database): void {
     ['total_cost', 'REAL', '0'],
     ['total_turns', 'INTEGER', '0'],
     ['effort_level', 'TEXT'],
+    ['compacted_at', 'TEXT'],
   ];
 
   for (const [name, type, defaultVal] of missingColumns) {
@@ -308,6 +309,7 @@ export interface UpdateSessionFields {
   lastActivity?: string;
   lastError?: string | null;
   title?: string;
+  compactedAt?: string;
 }
 
 export function updateSession(id: string, updates: UpdateSessionFields): Session | undefined {
@@ -354,6 +356,10 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   if (updates.title !== undefined) {
     sets.push('title = ?');
     values.push(updates.title);
+  }
+  if (updates.compactedAt !== undefined) {
+    sets.push('compacted_at = ?');
+    values.push(updates.compactedAt);
   }
 
   if (sets.length === 0) return getSession(id);
@@ -518,6 +524,27 @@ export function insertMessage(sessionId: string, role: string, content: string):
   const db = initDb();
   const id = uuidv4();
   db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)').run(id, sessionId, role, content, Date.now());
+}
+
+/**
+ * Atomically replace a set of messages with a single new message.
+ * Used by session compaction to swap old messages for a summary.
+ */
+export function replaceMessages(
+  sessionId: string,
+  deleteIds: string[],
+  newMessage: { role: string; content: string; timestamp: number },
+): void {
+  if (deleteIds.length === 0) return;
+  const db = initDb();
+  const placeholders = deleteIds.map(() => '?').join(',');
+  const txn = db.transaction(() => {
+    db.prepare(`DELETE FROM messages WHERE session_id = ? AND id IN (${placeholders})`).run(sessionId, ...deleteIds);
+    db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)').run(
+      uuidv4(), sessionId, newMessage.role, newMessage.content, newMessage.timestamp,
+    );
+  });
+  txn();
 }
 
 export function getMessages(sessionId: string): SessionMessage[] {

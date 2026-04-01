@@ -39,10 +39,9 @@ export function scanOrg(): Map<string, Employee> {
               effortLevel: typeof data.effortLevel === "string" ? data.effortLevel : undefined,
               maxDurationMinutes: typeof data.maxDurationMinutes === "number" ? data.maxDurationMinutes : undefined,
               maxCostUsd: typeof data.maxCostUsd === "number" ? data.maxCostUsd : undefined,
-              mcp: data.mcp,
+              mcp: data.mcp ?? undefined,
               alwaysNotify: typeof data.alwaysNotify === "boolean" ? data.alwaysNotify : true,
               reportsTo: data.reportsTo ?? undefined,
-              mcp: data.mcp ?? undefined,
               provides: Array.isArray(data.provides)
                 ? data.provides.filter((s: unknown) => s && typeof s === "object" && typeof (s as any).name === "string" && typeof (s as any).description === "string")
                   .map((s: any) => ({ name: s.name as string, description: s.description as string }))

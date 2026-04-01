@@ -152,6 +152,8 @@ export class ClaudeEngine implements InterruptibleEngine {
       let rateLimitInfo: EngineRateLimitInfo | undefined;
       let lineCount = 0;
       let inTool = false;
+      let currentToolName = "";
+      let currentToolId = "";
 
       const STDERR_MAX = 10 * 1024; // 10KB rolling window for error reporting
 
@@ -182,13 +184,18 @@ export class ClaudeEngine implements InterruptibleEngine {
 
             if (parsed.type === "__tool_start") {
               inTool = true;
+              currentToolName = parsed.delta.toolName ?? "";
+              currentToolId = parsed.delta.toolId ?? "";
               onStream(parsed.delta);
               continue;
             }
 
             if (parsed.type === "__tool_end") {
               inTool = false;
-              onStream(parsed.delta);
+              // Propagate toolName/toolId so hooks can identify which tool finished
+              onStream({ ...parsed.delta, toolName: currentToolName, toolId: currentToolId });
+              currentToolName = "";
+              currentToolId = "";
               continue;
             }
 

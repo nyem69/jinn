@@ -405,6 +405,14 @@ export interface JinnConfig {
     rateLimitStrategy?: "wait" | "fallback";
     /** Engine to use when rateLimitStrategy="fallback". Default: "codex" */
     fallbackEngine?: "codex";
+    /** Session compaction settings — summarize old messages to bound context */
+    compaction?: {
+      enabled?: boolean;
+      /** Token threshold above which compaction triggers. Default: 50000 */
+      maxEstimatedTokens?: number;
+      /** Number of most recent messages to preserve verbatim. Default: 6 */
+      preserveRecentMessages?: number;
+    };
   };
   cron?: {
     defaultDelivery?: CronDelivery;
@@ -428,4 +436,32 @@ export interface JinnConfig {
     languages?: string[];
   };
   remotes?: Record<string, { url: string; label?: string }>;
+  hooks?: HooksConfig;
+}
+
+// ── Hook Pipeline ──────────────────────────────────────────────────
+
+export type HookEvent = "preSession" | "postSession" | "onToolUse" | "onToolResult";
+
+export interface HookDefinition {
+  type: "shell" | "module";
+  /** Shell command (for type: "shell") */
+  command?: string;
+  /** Path to JS/TS module with default export (for type: "module") */
+  path?: string;
+  /** Only for preSession — wait for result and allow prompt modification. Default: false */
+  blocking?: boolean;
+  /** Timeout in ms for blocking hooks. Default: 5000 */
+  timeoutMs?: number;
+  /** Only run for specific engines. Default: all */
+  engines?: string[];
+  /** Only run for specific employees. Default: all */
+  employees?: string[];
+}
+
+export interface HooksConfig {
+  preSession?: HookDefinition[];
+  postSession?: HookDefinition[];
+  onToolUse?: HookDefinition[];
+  onToolResult?: HookDefinition[];
 }

@@ -30,6 +30,8 @@ import { loadJobs } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
 import { checkBudget } from "../gateway/budgets.js";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../mcp/resolver.js";
+import { compactSession, resolveCompactionConfig } from "./compact.js";
+import { HookRunner } from "../hooks/index.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -108,6 +110,7 @@ export class SessionManager {
   private connectorNames: string[];
   private queue = new SessionQueue();
   private connectorProvider: () => Map<string, Connector> = () => new Map();
+  private hookRunner: HookRunner | null;
 
   constructor(
     config: JinnConfig,
@@ -117,6 +120,7 @@ export class SessionManager {
     this.config = config;
     this.engines = engines;
     this.connectorNames = connectorNames;
+    this.hookRunner = config.hooks ? new HookRunner(config.hooks, JINN_HOME) : null;
   }
 
   setConnectorProvider(provider: () => Map<string, Connector>): void {
@@ -213,6 +217,15 @@ export class SessionManager {
       return;
     }
 
+    // Compact session if message history exceeds token threshold
+    const compactionConfig = resolveCompactionConfig(this.config);
+    if (compactionConfig.enabled) {
+      const removed = compactSession(session.id, compactionConfig);
+      if (removed > 0) {
+        logger.info(`Compacted session ${session.id}: removed ${removed} messages`);
+      }
+    }
+
     insertMessage(session.id, "user", msg.text);
 
     const capabilities = connector.getCapabilities();
@@ -248,7 +261,7 @@ export class SessionManager {
     } catch { /* fallback to filesystem scan in context builder */ }
 
     try {
-      const systemPrompt = buildContext({
+      let systemPrompt = buildContext({
         source: session.source,
         channel: msg.channel,
         thread: msg.thread,
@@ -345,6 +358,61 @@ export class SessionManager {
         }),
       });
 
+      // Run preSession hooks — blocking hooks can modify prompt or abort
+      if (this.hookRunner) {
+        const hookResult = await this.hookRunner.runPreSession({
+          sessionId: session.id,
+          engine: session.engine,
+          model: session.model ?? engineConfig.model,
+          employee: employee?.name,
+          prompt: promptToRun,
+          systemPrompt,
+          source: session.source,
+          channel: msg.channel,
+          user: msg.user,
+          timestamp: new Date().toISOString(),
+        });
+        if (hookResult.action === "abort") {
+          logger.warn(`Session ${session.id} aborted by preSession hook: ${hookResult.reason}`);
+          updateSession(session.id, { status: "error", lastError: hookResult.reason ?? "Hook aborted" });
+          if (decorateMessages && connector.setTypingStatus) {
+            await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
+          }
+          await connector.replyMessage(target, `Session aborted: ${hookResult.reason}`).catch(() => {});
+          if (decorateMessages && capabilities.reactions) {
+            await connector.removeReaction(target, "eyes").catch(() => {});
+          }
+          return;
+        }
+        if (hookResult.prompt) promptToRun = hookResult.prompt;
+        if (hookResult.systemPrompt) systemPrompt = hookResult.systemPrompt;
+      }
+
+      // Build onStream callback for tool hooks (observe tool usage in real time)
+      const hookOnStream = this.hookRunner?.hasToolHooks()
+        ? (delta: import("../shared/types.js").StreamDelta) => {
+            if (delta.type === "tool_use" && delta.toolName) {
+              this.hookRunner!.fireOnToolUse({
+                sessionId: session.id,
+                engine: session.engine,
+                employee: employee?.name,
+                toolName: delta.toolName,
+                toolId: delta.toolId,
+                timestamp: new Date().toISOString(),
+              });
+            } else if (delta.type === "tool_result") {
+              this.hookRunner!.fireOnToolResult({
+                sessionId: session.id,
+                engine: session.engine,
+                employee: employee?.name,
+                toolName: delta.toolName,
+                toolId: delta.toolId,
+                timestamp: new Date().toISOString(),
+              });
+            }
+          }
+        : undefined;
+
       const result = await engine.run({
         prompt: promptToRun,
         resumeSessionId: session.engineSessionId ?? undefined,
@@ -357,6 +425,7 @@ export class SessionManager {
         mcpConfigPath,
         attachments: attachments.length > 0 ? attachments : undefined,
         sessionId: session.id,
+        onStream: hookOnStream,
       });
 
       const wasInterrupted = result.error?.startsWith("Interrupted");
@@ -690,6 +759,21 @@ export class SessionManager {
       if (result.cost || result.numTurns) {
         accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
       }
+
+      // Fire postSession hooks (non-blocking)
+      this.hookRunner?.firePostSession({
+        sessionId: session.id,
+        engine: session.engine,
+        model: session.model ?? engineConfig.model,
+        employee: employee?.name,
+        result: result.result,
+        error: result.error,
+        cost: result.cost,
+        durationMs: result.durationMs,
+        numTurns: result.numTurns,
+        timestamp: new Date().toISOString(),
+      });
+
       if (decorateMessages && connector.setTypingStatus) {
         await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
       }
