@@ -62,6 +62,11 @@ interface Config {
       guildId?: string
       channelId?: string
     }
+    telegram?: {
+      botToken?: string
+      allowFrom?: number[]
+      ignoreOldMessagesOnBoot?: boolean
+    }
     whatsapp?: {
       authDir?: string
       allowFrom?: string[]
@@ -69,7 +74,7 @@ interface Config {
     web?: Record<string, never>
     instances?: Array<{
       id: string
-      type: "discord" | "slack" | "whatsapp"
+      type: "discord" | "slack" | "whatsapp" | "telegram"
       employee?: string
       botToken?: string
       allowFrom?: string | string[]
@@ -1168,6 +1173,48 @@ export default function SettingsPage() {
                       updateConfig(["connectors", "discord", "channelId"], v.trim() || undefined)
                     }
                     placeholder="Restrict to this channel (right-click → Copy Channel ID)"
+                  />
+                </FieldRow>
+
+                {/* Telegram */}
+                <div
+                  className="border-t border-[var(--separator)] mt-[var(--space-3)] pt-[var(--space-3)]"
+                />
+                <div
+                  className="text-[length:var(--text-caption1)] font-[var(--weight-semibold)] text-[var(--text-tertiary)] mb-[var(--space-2)]"
+                >
+                  Telegram
+                </div>
+                <FieldRow label="Bot Token">
+                  <SettingsInput
+                    type="password"
+                    value={config.connectors?.telegram?.botToken ?? ""}
+                    onChange={(v) =>
+                      updateConfig(["connectors", "telegram", "botToken"], v)
+                    }
+                    placeholder="123456:ABC-DEF..."
+                  />
+                </FieldRow>
+                <FieldRow label="Allow From (User IDs)">
+                  <SettingsInput
+                    value={Array.isArray(config.connectors?.telegram?.allowFrom)
+                      ? config.connectors?.telegram?.allowFrom?.join(", ")
+                      : ""}
+                    onChange={(v) =>
+                      updateConfig(
+                        ["connectors", "telegram", "allowFrom"],
+                        v.trim() ? v.split(",").map((entry) => Number(entry.trim())).filter((n) => !isNaN(n)) : undefined,
+                      )
+                    }
+                    placeholder="Telegram user IDs, comma-separated (optional)"
+                  />
+                </FieldRow>
+                <FieldRow label="Ignore Old Messages on Boot">
+                  <ToggleSwitch
+                    checked={config.connectors?.telegram?.ignoreOldMessagesOnBoot ?? true}
+                    onChange={(v) =>
+                      updateConfig(["connectors", "telegram", "ignoreOldMessagesOnBoot"], v)
+                    }
                   />
                 </FieldRow>
 

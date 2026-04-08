@@ -340,6 +340,10 @@ export interface DiscordConnectorConfig {
 }
 
 export interface TelegramConnectorConfig {
+  /** Unique instance identifier (e.g. "telegram-support") */
+  id?: string;
+  /** Employee to handle messages from this connector instance */
+  employee?: string;
   botToken: string;
   allowFrom?: number[];
   ignoreOldMessagesOnBoot?: boolean;
