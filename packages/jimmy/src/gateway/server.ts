@@ -267,7 +267,12 @@ export async function startGateway(
         ignoreOldMessagesOnBoot: config.connectors.telegram.ignoreOldMessagesOnBoot,
       });
       telegram.onMessage((msg) => {
-        sessionManager.route(msg, telegram).catch((err) => {
+        const routeOpts: RouteOptions = {};
+        if (config.connectors.telegram?.employee) {
+          const emp = employeeRegistry.get(config.connectors.telegram.employee);
+          if (emp) routeOpts.employee = emp;
+        }
+        sessionManager.route(msg, telegram, routeOpts).catch((err) => {
           logger.error(`Telegram route error: ${err instanceof Error ? err.message : err}`);
         });
       });
@@ -365,6 +370,23 @@ export async function startGateway(
             });
             await whatsapp.start();
             connector = whatsapp;
+            break;
+          }
+          case "telegram": {
+            const telegramConfig = { ...typeConfig, id } as any;
+            const tg = new TelegramConnector(telegramConfig);
+            tg.onMessage((msg) => {
+              const routeOpts: RouteOptions = {};
+              if (employee) {
+                const emp = employeeRegistry.get(employee);
+                if (emp) routeOpts.employee = emp;
+              }
+              sessionManager.route(msg, tg, routeOpts).catch((err) => {
+                logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
+              });
+            });
+            await tg.start();
+            connector = tg;
             break;
           }
           default:
@@ -473,6 +495,23 @@ export async function startGateway(
               });
               await whatsapp.start();
               connector = whatsapp;
+              break;
+            }
+            case "telegram": {
+              const telegramConfig = { ...typeConfig, id } as any;
+              const tg = new TelegramConnector(telegramConfig);
+              tg.onMessage((msg) => {
+                const routeOpts: RouteOptions = {};
+                if (employee) {
+                  const emp = employeeRegistry.get(employee);
+                  if (emp) routeOpts.employee = emp;
+                }
+                sessionManager.route(msg, tg, routeOpts).catch((err) => {
+                  logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
+                });
+              });
+              await tg.start();
+              connector = tg;
               break;
             }
             default:
