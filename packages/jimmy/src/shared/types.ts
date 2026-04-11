@@ -412,6 +412,8 @@ export interface JinnConfig {
     defaultDelivery?: CronDelivery;
     alertChannel?: string;
     alertConnector?: string;
+    /** If a cron job takes longer than this (ms), post a latency warning to the alert channel. Default: 300000 (5 min). */
+    alertThresholdMs?: number;
   };
   notifications?: {
     connector?: string;  // defaults to "discord"
