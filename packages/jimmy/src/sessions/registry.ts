@@ -153,8 +153,37 @@ export function initDb(): Database.Database {
     )
   `);
 
+  // Episode candidates — gateway-side auto-seeded rows for sessions
+  // that look like substantive multi-agent or analytical work. A weekly
+  // grading cron reads these, runs LLM judgment, and either promotes
+  // them to a curated row in the `episodes` table or marks them rejected.
+  db.exec(EPISODE_CANDIDATES_SCHEMA);
+
   return db;
 }
+
+const EPISODE_CANDIDATES_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS episode_candidates (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    parent_session_id TEXT,
+    employee TEXT,
+    trigger_type TEXT,
+    trigger_ref TEXT,
+    cost_usd REAL,
+    num_turns INTEGER,
+    num_children INTEGER,
+    prompt_excerpt TEXT,
+    result_excerpt TEXT,
+    promoted_episode_id TEXT,
+    promoted_at TEXT,
+    rejected_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_ec_pending
+    ON episode_candidates (created_at)
+    WHERE promoted_at IS NULL AND rejected_at IS NULL;
+`;
 
 export function migrateSessionsSchema(database: Database.Database): void {
   const cols = database.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
@@ -432,6 +461,126 @@ export function accumulateSessionCost(id: string, cost: number, turns: number): 
   db.prepare(
     'UPDATE sessions SET total_cost = total_cost + ?, total_turns = total_turns + ? WHERE id = ?',
   ).run(cost, turns, id);
+}
+
+/**
+ * Insert a row into cost_log for the given session. Looks up the session's
+ * source/source_ref to populate trigger_type + trigger_ref accurately.
+ *
+ * Called from the gateway's session-completion path. The CLAUDE.md
+ * auto-housekeeping protocol used to ask skills to do this in bash;
+ * gateway-side logging makes it automatic + reliable.
+ *
+ * Token counts are NULL — Claude's `total_cost_usd` is the authoritative
+ * cost, computed by Anthropic with their actual rates. Tokens can be
+ * threaded through later if a use case needs them.
+ */
+export function logSessionCost(opts: {
+  sessionId: string;
+  engine: string;
+  model: string | null;
+  employee: string | null;
+  costUsd: number;
+}): void {
+  const db = initDb();
+  // Look up source/source_ref so we know whether this was cron, user,
+  // delegation, eval, etc.
+  const sessRow = db
+    .prepare('SELECT source, source_ref, parent_session_id FROM sessions WHERE id = ?')
+    .get(opts.sessionId) as { source?: string; source_ref?: string; parent_session_id?: string } | undefined;
+
+  const triggerType = sessRow?.source || 'user';
+  const triggerRef = sessRow?.source_ref || sessRow?.parent_session_id || null;
+
+  // Schema has NOT NULL on engine + model — fall back to "(default)" rather
+  // than crashing the post-session path when the engine config didn't carry
+  // an explicit model name.
+  const modelStr = opts.model ?? "(default)";
+
+  db.prepare(
+    `INSERT INTO cost_log (id, session_id, employee, engine, model, trigger_type, trigger_ref, input_tokens, output_tokens, cost_usd)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+  ).run(
+    randomUUID(),
+    opts.sessionId,
+    opts.employee,
+    opts.engine,
+    modelStr,
+    triggerType,
+    triggerRef,
+    opts.costUsd,
+  );
+}
+
+/**
+ * Seed an episode_candidates row for sessions that look substantive enough
+ * to potentially become curated `episodes`. Heuristic: numTurns >= 5 AND
+ * costUsd >= 0.50 OR session is a parent of 2+ child sessions.
+ *
+ * Called from the same gateway cost sites as logSessionCost. A weekly
+ * grading cron reads pending candidates and either promotes them to
+ * `episodes` (with LLM-curated task_summary / quality / lesson_learned)
+ * or marks them rejected.
+ *
+ * Heuristic rationale: solo cheap sessions (a quick haiku Q&A) aren't
+ * worth grading — the corpus we want is multi-agent investigations,
+ * weekly recaps, sitreps, briefs. Cost + numTurns are cheap proxies for
+ * that without requiring the skill to opt-in.
+ */
+export function recordEpisodeCandidate(opts: {
+  sessionId: string;
+  employee: string | null;
+  costUsd: number;
+  numTurns: number;
+  promptExcerpt?: string | null;
+  resultExcerpt?: string | null;
+}): void {
+  const db = initDb();
+
+  // Lookup session for trigger + parent context, plus child count for the
+  // multi-agent override.
+  const sessRow = db
+    .prepare('SELECT source, source_ref, parent_session_id FROM sessions WHERE id = ?')
+    .get(opts.sessionId) as {
+      source?: string;
+      source_ref?: string;
+      parent_session_id?: string;
+    } | undefined;
+
+  const childCountRow = db
+    .prepare('SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id = ?')
+    .get(opts.sessionId) as { n?: number } | undefined;
+  const numChildren = childCountRow?.n ?? 0;
+
+  // Heuristic gate.
+  const looksSubstantive =
+    (opts.costUsd >= 0.50 && opts.numTurns >= 5) || numChildren >= 2;
+  if (!looksSubstantive) return;
+
+  // Deduplicate — don't insert twice for the same session.
+  const existing = db
+    .prepare('SELECT id FROM episode_candidates WHERE session_id = ?')
+    .get(opts.sessionId);
+  if (existing) return;
+
+  db.prepare(
+    `INSERT INTO episode_candidates (
+       id, session_id, parent_session_id, employee, trigger_type, trigger_ref,
+       cost_usd, num_turns, num_children, prompt_excerpt, result_excerpt
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    randomUUID(),
+    opts.sessionId,
+    sessRow?.parent_session_id ?? null,
+    opts.employee,
+    sessRow?.source ?? null,
+    sessRow?.source_ref ?? null,
+    opts.costUsd,
+    opts.numTurns,
+    numChildren,
+    (opts.promptExcerpt ?? '').slice(0, 500),
+    (opts.resultExcerpt ?? '').slice(0, 500),
+  );
 }
 
 /**

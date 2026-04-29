@@ -642,6 +642,14 @@ export async function startGateway(
   // Sync skill symlinks to .claude/skills/ and .agents/skills/
   syncSkillSymlinks();
 
+  // Validate skill dependency declarations and warn on missing references.
+  try {
+    const { warnOnMissingSkillDependencies } = await import("../skills/validator.js");
+    warnOnMissingSkillDependencies();
+  } catch (err) {
+    logger.debug(`Skill validator skipped: ${err instanceof Error ? err.message : err}`);
+  }
+
   // Initialize STT model symlinks
   try {
     initStt();
@@ -655,6 +663,7 @@ export async function startGateway(
       try {
         currentConfig = loadConfig();
         apiContext.config = currentConfig;
+        sessionManager.updateConfig(currentConfig);
         logger.info("Config reloaded successfully");
         emit("config:reloaded", {});
       } catch (err) {
@@ -676,6 +685,10 @@ export async function startGateway(
     },
     onSkillsChange: () => {
       logger.info("Skills changed, notifying clients");
+      // Re-validate dependency declarations after skills/ mutation.
+      import("../skills/validator.js")
+        .then(({ warnOnMissingSkillDependencies }) => warnOnMissingSkillDependencies())
+        .catch((err) => logger.debug(`Skill validator skipped: ${err instanceof Error ? err.message : err}`));
       emit("skills:changed", {});
     },
   });

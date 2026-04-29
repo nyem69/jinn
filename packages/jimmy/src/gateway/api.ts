@@ -20,6 +20,9 @@ import {
   deleteSessions,
   duplicateSession,
   insertMessage,
+  accumulateSessionCost,
+  logSessionCost,
+  recordEpisodeCandidate,
   getMessages,
   enqueueQueueItem,
   cancelQueueItem,
@@ -54,6 +57,8 @@ import { handleFilesRequest, ensureFilesDir } from "./files.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "../sessions/callbacks.js";
 import { loadInstances } from "../cli/instances.js";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../mcp/resolver.js";
+import { scanOrg, findEmployee } from "./org.js";
+import { scanSkills } from "../skills/validator.js";
 
 export interface ApiContext {
   config: JinnConfig;
@@ -806,7 +811,8 @@ export async function handleApiRequest(
     // GET /api/cron
     if (method === "GET" && pathname === "/api/cron") {
       const jobs = loadJobs();
-      // Enrich with last run status
+      const cronParser = await import("cron-parser");
+      // Enrich with last run status + next fire time
       const enriched = jobs.map((job) => {
         const runFile = path.join(CRON_RUNS, `${job.id}.jsonl`);
         let lastRun = null;
@@ -816,7 +822,20 @@ export async function handleApiRequest(
             try { lastRun = JSON.parse(lines[lines.length - 1]); } catch {}
           }
         }
-        return { ...job, lastRun };
+        // Compute next fire time. Disabled jobs return null.
+        let nextRun: string | null = null;
+        if (job.enabled) {
+          try {
+            const opts: { tz?: string } = {};
+            if (job.timezone) opts.tz = job.timezone;
+            const interval = cronParser.CronExpressionParser.parse(job.schedule, opts);
+            nextRun = interval.next().toDate().toISOString();
+          } catch {
+            // Invalid schedule — leave nextRun null; the scheduler already
+            // logs a warning at boot for unparseable schedules.
+          }
+        }
+        return { ...job, lastRun, nextRun };
       });
       return json(res, enriched);
     }
@@ -889,11 +908,87 @@ export async function handleApiRequest(
     }
 
     // POST /api/cron/:id/trigger — manually run a cron job now
+    // Pass ?dry_run=true to resolve the prompt + MCP + employee without spawning claude
     params = matchRoute("/api/cron/:id/trigger", pathname);
     if (method === "POST" && params) {
       const jobs = loadJobs();
       const job = jobs.find((j) => j.id === params!.id);
       if (!job) return notFound(res);
+
+      const dryRun = url.searchParams.get("dry_run") === "true";
+
+      if (dryRun) {
+        // Resolve everything that would happen — without spawning claude
+        const cfg = context.getConfig();
+        const issues: string[] = [];
+
+        // Employee resolution. The COO/portal slug isn't an org/ employee — skip it.
+        const cooSlug = cfg.portal?.portalName?.toLowerCase() || "jinn";
+        let employee = undefined as ReturnType<typeof findEmployee> | undefined;
+        if (job.employee && job.employee !== cooSlug) {
+          const orgRegistry = scanOrg();
+          employee = findEmployee(job.employee, orgRegistry);
+          if (!employee) {
+            issues.push(`Employee "${job.employee}" not found in ~/.jinn/org/`);
+          }
+        }
+
+        // MCP config resolution (same call path as a real spawn)
+        const mcp = resolveMcpServers(cfg.mcp, employee || undefined);
+        const mcpServers = Object.keys(mcp.mcpServers).sort();
+
+        // Sanity-check stdio MCP server commands exist on PATH or as absolute paths
+        for (const [name, srv] of Object.entries(mcp.mcpServers)) {
+          if ("command" in srv && srv.command) {
+            const cmd = srv.command;
+            // Absolute path: stat it; relative: trust PATH but flag if obviously wrong
+            if (cmd.startsWith("/") && !fs.existsSync(cmd)) {
+              issues.push(`MCP "${name}" command not found at ${cmd}`);
+            }
+            // For node-launched MCPs: confirm the script file exists
+            if ("args" in srv && Array.isArray(srv.args)) {
+              for (const arg of srv.args) {
+                if (typeof arg === "string" && arg.startsWith("/") && arg.endsWith(".js") && !fs.existsSync(arg)) {
+                  issues.push(`MCP "${name}" script not found at ${arg}`);
+                }
+              }
+            }
+          }
+        }
+
+        // Engine + model that would be picked
+        const engineName = job.engine || cfg.engines?.default || "claude";
+        const model =
+          job.model ||
+          (engineName === "claude" ? cfg.engines?.claude?.model : cfg.engines?.codex?.model) ||
+          "(engine default)";
+
+        // Delivery resolution
+        const delivery = job.delivery || cfg.cron?.defaultDelivery || null;
+
+        return json(res, {
+          dryRun: true,
+          jobId: job.id,
+          name: job.name,
+          enabled: job.enabled,
+          schedule: job.schedule,
+          timezone: job.timezone || "UTC",
+          engine: engineName,
+          model,
+          employee: job.employee || null,
+          employeeResolved: employee
+            ? { name: employee.name, department: (employee as any).department || null }
+            : null,
+          mcpServers,
+          mcpServerCount: mcpServers.length,
+          delivery,
+          promptLength: job.prompt.length,
+          promptPreview: job.prompt.length > 500 ? job.prompt.slice(0, 500) + "..." : job.prompt,
+          prompt: job.prompt,
+          issues,
+          ok: issues.length === 0,
+        });
+      }
 
       logger.info(`Manual trigger for cron job "${job.name}" (${job.id})`);
 
@@ -1168,41 +1263,7 @@ Handle this as a priority request from a colleague.`;
 
     // GET /api/skills
     if (method === "GET" && pathname === "/api/skills") {
-      if (!fs.existsSync(SKILLS_DIR)) return json(res, []);
-      const entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true });
-      const skills = entries.filter((e) => e.isDirectory()).map((e) => {
-        const skillMdPath = path.join(SKILLS_DIR, e.name, "SKILL.md");
-        let description = "";
-        if (fs.existsSync(skillMdPath)) {
-          const content = fs.readFileSync(skillMdPath, "utf-8");
-          // Extract description from YAML frontmatter, ## Trigger section, or first paragraph
-          const frontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
-          if (frontmatterMatch) {
-            const descMatch = frontmatterMatch[1].match(/^description:\s*(.+)$/m);
-            if (descMatch) {
-              description = descMatch[1].trim();
-            }
-          }
-          if (!description) {
-            const triggerMatch = content.match(/##\s*Trigger\s*\n+([^\n#]+)/);
-            if (triggerMatch) {
-              description = triggerMatch[1].trim();
-            } else {
-              // Use first non-heading, non-empty, non-frontmatter line
-              const bodyContent = frontmatterMatch ? content.slice(frontmatterMatch[0].length) : content;
-              const lines = bodyContent.split("\n");
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (trimmed && !trimmed.startsWith("#")) {
-                  description = trimmed;
-                  break;
-                }
-              }
-            }
-          }
-        }
-        return { name: e.name, description };
-      });
+      const skills = scanSkills();
       return json(res, skills);
     }
 
@@ -2460,6 +2521,50 @@ async function runWebSession(
       status: wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
       lastActivity: new Date().toISOString(),
       lastError: wasInterrupted ? null : (result.error ?? null),
+    });
+    if (result.cost || result.numTurns) {
+      try {
+        accumulateSessionCost(currentSession.id, result.cost ?? 0, result.numTurns ?? 1);
+      } catch (err) {
+        logger.warn(`accumulateSessionCost failed for ${currentSession.id}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    if (typeof result.cost === "number" && result.cost > 0) {
+      try {
+        logSessionCost({
+          sessionId: currentSession.id,
+          engine: currentSession.engine,
+          model: currentSession.model ?? null,
+          employee: currentSession.employee ?? null,
+          costUsd: result.cost,
+        });
+      } catch (err) {
+        logger.warn(`logSessionCost failed for ${currentSession.id}: ${err instanceof Error ? err.message : err}`);
+      }
+      try {
+        recordEpisodeCandidate({
+          sessionId: currentSession.id,
+          employee: currentSession.employee ?? null,
+          costUsd: result.cost,
+          numTurns: result.numTurns ?? 1,
+          resultExcerpt: result.result ?? null,
+        });
+      } catch (err) {
+        logger.warn(`recordEpisodeCandidate failed for ${currentSession.id}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    // Fire postSession hooks (non-blocking) for the cost-logger JSONL audit log
+    context.sessionManager.firePostSessionHook?.({
+      sessionId: currentSession.id,
+      engine: currentSession.engine,
+      model: currentSession.model ?? null,
+      employee: currentSession.employee ?? undefined,
+      result: result.result,
+      error: result.error,
+      cost: result.cost,
+      durationMs: result.durationMs,
+      numTurns: result.numTurns,
+      timestamp: new Date().toISOString(),
     });
     if (syncRequested && !rateLimit.limited && !wasInterrupted) {
       const meta = (getSession(currentSession.id)?.transportMeta || currentSession.transportMeta || {}) as Record<string, unknown>;

@@ -11,6 +11,8 @@ import type {
 import { startSessionTimeout } from "../shared/timeout.js";
 import {
   accumulateSessionCost,
+  logSessionCost,
+  recordEpisodeCandidate,
   createSession,
   deleteSession,
   getSessionBySessionKey,
@@ -125,6 +127,18 @@ export class SessionManager {
 
   setConnectorProvider(provider: () => Map<string, Connector>): void {
     this.connectorProvider = provider;
+  }
+
+  updateConfig(config: JinnConfig): void {
+    this.config = config;
+    this.hookRunner = config.hooks ? new HookRunner(config.hooks, JINN_HOME) : null;
+  }
+
+  /** Public proxy for the HookRunner.firePostSession — used by the web-session
+   *  completion path in api.ts so the cost-logger JSONL hook catches web sessions
+   *  the same way it catches connector-routed sessions. */
+  firePostSessionHook(ctx: Parameters<HookRunner["firePostSession"]>[0]): void {
+    this.hookRunner?.firePostSession(ctx);
   }
 
   getEngine(name: string): Engine | undefined {
@@ -530,6 +544,19 @@ export class SessionManager {
             if (fallbackResult.cost || fallbackResult.numTurns) {
               accumulateSessionCost(session.id, fallbackResult.cost ?? 0, fallbackResult.numTurns ?? 1);
             }
+            if (typeof fallbackResult.cost === "number" && fallbackResult.cost > 0) {
+              try {
+                logSessionCost({
+                  sessionId: session.id,
+                  engine: "codex",
+                  model: session.model ?? null,
+                  employee: employee?.name ?? null,
+                  costUsd: fallbackResult.cost,
+                });
+              } catch (err) {
+                logger.warn(`logSessionCost (codex fallback) failed for ${session.id}: ${err instanceof Error ? err.message : err}`);
+              }
+            }
 
             // Persist Codex thread id so future fallbacks can resume it
             const nextEngineSessions = { ...engineSessions };
@@ -698,6 +725,19 @@ export class SessionManager {
             if (retryResult.cost || retryResult.numTurns) {
               accumulateSessionCost(session.id, retryResult.cost ?? 0, retryResult.numTurns ?? 1);
             }
+            if (typeof retryResult.cost === "number" && retryResult.cost > 0) {
+              try {
+                logSessionCost({
+                  sessionId: session.id,
+                  engine: session.engine,
+                  model: session.model ?? null,
+                  employee: employee?.name ?? null,
+                  costUsd: retryResult.cost,
+                });
+              } catch (err) {
+                logger.warn(`logSessionCost (retry) failed for ${session.id}: ${err instanceof Error ? err.message : err}`);
+              }
+            }
 
             // Clear typing indicator & reactions
             if (decorateMessages && connector.setTypingStatus) {
@@ -758,6 +798,30 @@ export class SessionManager {
       insertMessage(session.id, "assistant", responseText);
       if (result.cost || result.numTurns) {
         accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
+      }
+      if (typeof result.cost === "number" && result.cost > 0) {
+        try {
+          logSessionCost({
+            sessionId: session.id,
+            engine: session.engine,
+            model: session.model ?? engineConfig.model ?? null,
+            employee: employee?.name ?? null,
+            costUsd: result.cost,
+          });
+        } catch (err) {
+          logger.warn(`logSessionCost failed for ${session.id}: ${err instanceof Error ? err.message : err}`);
+        }
+        try {
+          recordEpisodeCandidate({
+            sessionId: session.id,
+            employee: employee?.name ?? null,
+            costUsd: result.cost,
+            numTurns: result.numTurns ?? 1,
+            resultExcerpt: result.result ?? null,
+          });
+        } catch (err) {
+          logger.warn(`recordEpisodeCandidate failed for ${session.id}: ${err instanceof Error ? err.message : err}`);
+        }
       }
 
       // Fire postSession hooks (non-blocking)
