@@ -8,6 +8,12 @@ export interface SkillFrontmatter {
   name?: string;
   description?: string;
   dependencies?: string[];
+  /**
+   * When true, the gateway omits this skill from `.claude/skills/` and
+   * `.agents/skills/` symlinks so it doesn't appear in the engine's catalog.
+   * The skill stays readable by exact path or by `Skill` tool name.
+   */
+  hidden?: boolean;
   // Other fields are tolerated but not validated here.
   [key: string]: unknown;
 }

@@ -3,6 +3,24 @@ import path from "node:path";
 import { watch, type FSWatcher } from "chokidar";
 import { CONFIG_PATH, CRON_JOBS, ORG_DIR, SKILLS_DIR, CLAUDE_SKILLS_DIR, AGENTS_SKILLS_DIR } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
+import { parseSkillFrontmatter } from "../skills/validator.js";
+
+/**
+ * Read a skill's `hidden: true` flag from its SKILL.md frontmatter.
+ * Returns false on any failure — missing file, malformed YAML, no flag.
+ * Hiding is opt-in; we never hide by accident.
+ */
+function isSkillHidden(skillName: string): boolean {
+  const skillMd = path.join(SKILLS_DIR, skillName, "SKILL.md");
+  let content: string;
+  try {
+    content = fs.readFileSync(skillMd, "utf-8");
+  } catch {
+    return false;
+  }
+  const fm = parseSkillFrontmatter(content);
+  return fm?.hidden === true;
+}
 
 export interface WatcherCallbacks {
   onConfigReload: () => void;
@@ -36,13 +54,21 @@ export function syncSkillSymlinks(): void {
       .map((e) => e.name);
   }
 
+  // Skills with `hidden: true` frontmatter are excluded from the engine
+  // catalog. They're still on disk and readable by exact name; we just
+  // don't symlink them so Claude/Codex don't surface them in their
+  // skill listings.
+  const visibleNames = skillNames.filter((name) => !isSkillHidden(name));
+  const visibleSet = new Set(visibleNames);
+
   for (const targetDir of targetDirs) {
     fs.mkdirSync(targetDir, { recursive: true });
 
-    // Remove stale symlinks
+    // Remove stale symlinks — including ones for skills that are now hidden
+    // or whose source directory was deleted.
     const existing = fs.readdirSync(targetDir, { withFileTypes: true });
     for (const entry of existing) {
-      if (!skillNames.includes(entry.name)) {
+      if (!visibleSet.has(entry.name)) {
         const linkPath = path.join(targetDir, entry.name);
         try {
           fs.unlinkSync(linkPath);
@@ -54,7 +80,7 @@ export function syncSkillSymlinks(): void {
     }
 
     // Create missing symlinks (with copy fallback for Windows without Developer Mode)
-    for (const name of skillNames) {
+    for (const name of visibleNames) {
       const linkPath = path.join(targetDir, name);
       const relTarget = path.join("..", "..", "skills", name);
       const absTarget = path.join(SKILLS_DIR, name);
@@ -114,10 +140,11 @@ export function startWatchers(callbacks: WatcherCallbacks): void {
     }, DEBOUNCE_MS),
   );
 
-  // Watch skills/ directory for added/removed skill folders → sync symlinks
+  // Watch skills/ directory for added/removed skill folders → sync symlinks.
+  // Depth 2 so toggling `hidden:` in `skills/<name>/SKILL.md` also re-syncs.
   const skillsWatcher = watch(SKILLS_DIR, {
     ignoreInitial: true,
-    depth: 0,
+    depth: 2,
   });
   skillsWatcher.on(
     "all",
