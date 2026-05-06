@@ -69,16 +69,37 @@ export async function runCronJob(
       },
     );
 
+    const durationMs = Date.now() - startTime;
     appendRunLog(job.id, {
       timestamp: startedAt,
       sessionKey,
       sessionId: routeResult?.sessionId ?? null,
       status: "success",
-      durationMs: Date.now() - startTime,
+      durationMs,
       error: null,
       resultPreview: null,
     });
-    logger.info(`Cron job "${job.name}" completed in ${Date.now() - startTime}ms`);
+    logger.info(`Cron job "${job.name}" completed in ${durationMs}ms`);
+
+    // Latency alert: warn if job exceeded threshold
+    const thresholdMs = config.cron?.alertThresholdMs;
+    if (thresholdMs && durationMs > thresholdMs) {
+      const alertConnector = config.cron?.alertConnector;
+      const alertChannel = config.cron?.alertChannel;
+      if (alertConnector && alertChannel) {
+        const alertTarget = connectors.get(alertConnector);
+        if (alertTarget) {
+          const mins = (durationMs / 60_000).toFixed(1);
+          const threshMins = (thresholdMs / 60_000).toFixed(1);
+          await alertTarget.sendMessage(
+            { channel: alertChannel },
+            `🐢 Cron latency alert: "${job.name}" (${job.id}) exceeded threshold — took ${mins}min (threshold: ${threshMins}min). Session: ${routeResult?.sessionId ?? "unknown"}`,
+          ).catch((alertErr) => {
+            logger.error(`Failed to send latency alert: ${alertErr instanceof Error ? alertErr.message : alertErr}`);
+          });
+        }
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     appendRunLog(job.id, {

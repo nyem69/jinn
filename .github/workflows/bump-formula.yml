@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Extract version from tag
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
@@ -42,4 +44,4 @@ jobs:
           git add Formula/jinn.rb
           git diff --cached --quiet && echo "No changes" && exit 0
           git commit -m "formula: bump to v${VERSION}"
-          git push
+          git push origin HEAD:main

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.10.0] - 2026-04-28
+
+### ✨ Features
+- **Full Telegram connector** — web UI configuration, employee routing, typing indicators, media support
+- **`/models` command + Opus 4.7 support** in Telegram (#50)
+- **Cron job latency alerting** — Slack warning when scheduled jobs exceed threshold
+
+### 🐛 Fixes
+- **Slack `app_mention` handler** — bot now responds to `@Bot` mentions in channels; root channel messages without mention are correctly ignored (#46, thanks @lisovet)
+- **`crypto.randomUUID` polyfill** — web UI no longer crashes when accessed over plain HTTP on LAN/Tailscale (#47, thanks @lisovet)
+- **`body.model` honored** in `POST /api/sessions` and `/stub` — per-employee model routing now works for MCP and API clients (#45, thanks @papajade55-debug, closes #38)
+- **Slack unfurl crash** — skip unfurl events that crashed the Claude engine (#44, thanks @MarockNRoll)
+
 ## [0.7.0] - 2026-03-19
 
 ### ✨ Features — Project Phoenix
