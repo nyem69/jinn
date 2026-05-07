@@ -32,7 +32,7 @@ import {
   getFile,
 } from "../sessions/registry.js";
 import { forkEngineSession } from "../sessions/fork.js";
-import { emitEvent } from "../events/emit.js";
+import { emitAndDispatch } from "../events/emit.js";
 import { readEventsSingle, readEventsSubtree } from "../events/api.js";
 import {
   startSseStream,
@@ -593,7 +593,7 @@ export async function handleApiRequest(
         return badRequest(res, "kind is required");
       }
       const seq = typeof body?.seq === "number" && Number.isInteger(body.seq) && body.seq > 0 ? body.seq : undefined;
-      const result = emitEvent(params.id, body.kind, body.payload, { seq });
+      const result = emitAndDispatch(params.id, body.kind, body.payload, { seq });
       if (!result.ok) {
         if (result.reason === "unknown_session") return notFound(res);
         if (result.reason === "invalid_payload") {

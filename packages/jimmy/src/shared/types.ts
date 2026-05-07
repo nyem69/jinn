@@ -444,6 +444,22 @@ export interface JinnConfig {
   };
   remotes?: Record<string, { url: string; label?: string }>;
   hooks?: HooksConfig;
+  /**
+   * T1A rollout flags. Each handler in features.handlers.<name> can be
+   * flipped without restart. Missing entries fall through to the
+   * handler's defaultEnabled flag in code.
+   */
+  features?: {
+    lineage?: boolean;
+    session_events?: boolean;
+    session_events_sse?: boolean;
+    session_events_handlers?: boolean;
+    session_result?: boolean;
+    claude_event_transport?: "sideband" | "stdout" | "off";
+    checkpoints?: boolean;
+    replay_cli?: boolean;
+    handlers?: Record<string, boolean>;
+  };
 }
 
 // ── Hook Pipeline ──────────────────────────────────────────────────

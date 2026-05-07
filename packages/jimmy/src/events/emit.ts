@@ -1,7 +1,9 @@
 import type Database from 'better-sqlite3';
 import { initDb } from '../sessions/registry.js';
+import { logger } from '../shared/logger.js';
 import { rowToSessionEvent, type SessionEventRow } from './db.js';
 import { validateEvent } from './schema.js';
+import { dispatchEventHandlers } from './handlers.js';
 
 // T1A.PR2: gateway-internal write path. Every emitter (engine parsers,
 // skill harnesses, manual API callers under the loopback auth) funnels
@@ -101,4 +103,28 @@ export function emitEventOn(
     .get(result.id) as Record<string, unknown>;
 
   return { ok: true, event: rowToSessionEvent(row) };
+}
+
+// emitAndDispatch — convenience wrapper that fires the default handler
+// dispatch as a fire-and-forget side effect after a successful emit.
+// Production callers (gateway POST /events, engine emitters) should use
+// this; tests + replay use the bare emitEvent.
+export function emitAndDispatch(
+  sessionId: string,
+  kind: string,
+  payload: unknown,
+  opts: EmitOpts = {},
+): EmitOk | EmitErr {
+  const result = emitEvent(sessionId, kind, payload, opts);
+  if (result.ok) {
+    queueMicrotask(() => {
+      const db = initDb();
+      void dispatchEventHandlers(db, result.event).catch((e) => {
+        logger.error(
+          `dispatchEventHandlers crashed for event ${result.event.id}: ${(e as Error).message}`,
+        );
+      });
+    });
+  }
+  return result;
 }
