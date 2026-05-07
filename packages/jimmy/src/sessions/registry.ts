@@ -5,6 +5,8 @@ import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { SESSIONS_DB } from '../shared/paths.js';
 import type { JsonObject, ReplyContext, Session } from '../shared/types.js';
+import { initEventsSchema } from '../events/db.js';
+import { initHandlerRegistry } from '../events/handlers.js';
 
 let db: Database.Database;
 
@@ -159,6 +161,13 @@ export function initDb(): Database.Database {
   // grading cron reads these, runs LLM judgment, and either promotes
   // them to a curated row in the `episodes` table or marks them rejected.
   db.exec(EPISODE_CANDIDATES_SCHEMA);
+
+  // T1A.PR2 — append-only event log + handler registry + DLQ. Lives
+  // in its own module so the events surface stays self-contained.
+  initEventsSchema(db);
+  // T1A.PR2.D — seed default handler rows so dispatchEventHandlers
+  // finds them. Idempotent via UNIQUE(kind_filter, processor) index.
+  initHandlerRegistry(db);
 
   return db;
 }
