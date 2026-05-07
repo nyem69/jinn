@@ -32,6 +32,7 @@ import {
   getFile,
 } from "../sessions/registry.js";
 import { forkEngineSession } from "../sessions/fork.js";
+import { emitEvent } from "../events/emit.js";
 import {
   CONFIG_PATH,
   CRON_JOBS,
@@ -460,6 +461,34 @@ export async function handleApiRequest(
       logger.info(`Session deleted: ${params.id}`);
       context.emit("session:deleted", { sessionId: params.id });
       return json(res, { status: "deleted" });
+    }
+
+    // POST /api/sessions/:id/events — append an event to the session
+    // event log (T1A.PR2). Internal-only; the gateway is loopback-bound
+    // by default so this is reachable only by emitters running on the
+    // host (engine parsers, skill harnesses).
+    params = matchRoute("/api/sessions/:id/events", pathname);
+    if (method === "POST" && params) {
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
+      if (typeof body?.kind !== "string" || !body.kind.trim()) {
+        return badRequest(res, "kind is required");
+      }
+      const seq = typeof body?.seq === "number" && Number.isInteger(body.seq) && body.seq > 0 ? body.seq : undefined;
+      const result = emitEvent(params.id, body.kind, body.payload, { seq });
+      if (!result.ok) {
+        if (result.reason === "unknown_session") return notFound(res);
+        if (result.reason === "invalid_payload") {
+          return json(res, { error: "invalid payload", errors: result.errors }, 400);
+        }
+        if (result.reason === "collision") {
+          return json(res, { error: "seq collision" }, 409);
+        }
+      } else {
+        return json(res, result.event, 201);
+      }
     }
 
     // POST /api/sessions/:id/stop
