@@ -1,0 +1,10 @@
+{"type":"system","subtype":"init","session_id":"sim-multi","model":"claude-opus-4-7","cwd":"/tmp"}
+{"type":"assistant","message":{"id":"msg_01","content":[{"type":"text","text":"Let me check the file."}],"stop_reason":"tool_use","usage":{"input_tokens":15,"output_tokens":7}}}
+{"type":"assistant","message":{"id":"msg_02","content":[{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/tmp/a"}}],"stop_reason":"tool_use","usage":{"input_tokens":15,"output_tokens":12}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"contents of /tmp/a","is_error":false}]}}
+{"type":"assistant","message":{"id":"msg_03","content":[{"type":"tool_use","id":"toolu_02","name":"Bash","input":{"command":"ls /tmp"}}],"stop_reason":"tool_use","usage":{"input_tokens":35,"output_tokens":18}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_02","content":"a\nb\nc","is_error":false}]}}
+{"type":"assistant","message":{"id":"msg_04","content":[{"type":"tool_use","id":"toolu_03","name":"Edit","input":{"file_path":"/tmp/a","old_string":"x","new_string":"y"}}],"stop_reason":"tool_use","usage":{"input_tokens":55,"output_tokens":22}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_03","content":"file edited","is_error":false}]}}
+{"type":"assistant","message":{"id":"msg_05","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn","usage":{"input_tokens":75,"output_tokens":26}}}
+{"type":"result","subtype":"success","duration_ms":3500,"is_error":false,"num_turns":4,"total_cost_usd":0.012,"usage":{"input_tokens":75,"output_tokens":26},"result":"Done.","session_id":"sim-multi"}
