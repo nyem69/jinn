@@ -2,6 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type { EngineRateLimitInfo, InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { isDeadSessionError } from "../shared/rateLimit.js";
+import { ClaudeStreamParser } from "./claude/parser.js";
+import { dispatchParserOutput, getClaudeTransport } from "./claude/emitter.js";
 
 interface LiveProcess {
   proc: ChildProcess;
@@ -157,6 +159,17 @@ export class ClaudeEngine implements InterruptibleEngine {
 
       const STDERR_MAX = 10 * 1024; // 10KB rolling window for error reporting
 
+      // T1A.PR4 follow-up: parallel jin event-log parser. Default
+      // JIN_CLAUDE_EVENT_TRANSPORT=off keeps this inert in production
+      // until the operator flips the flag. The original processStreamLine
+      // pipe is untouched; this only adds a read-side fan-out into the
+      // session_events log + PR2.D handler dispatch.
+      const eventTransport = getClaudeTransport();
+      const eventParser =
+        eventTransport !== "off" && streaming && opts.sessionId
+          ? new ClaudeStreamParser()
+          : null;
+
       if (streaming && opts.onStream) {
         const onStream = opts.onStream;
         let lineBuf = "";
@@ -169,6 +182,19 @@ export class ClaudeEngine implements InterruptibleEngine {
           const lines = lineBuf.split("\n");
           lineBuf = lines.pop() || "";
           for (const line of lines) {
+            // T1A.PR4 follow-up: feed the same line through the jin
+            // parser. Errors are swallowed at debug — the parser's own
+            // unknown-event counter is the surface for monitoring.
+            if (eventParser && opts.sessionId) {
+              try {
+                for (const out of eventParser.parse(line)) {
+                  dispatchParserOutput(opts.sessionId, out);
+                }
+              } catch (err) {
+                logger.debug(`[claude parser dispatch] ${(err as Error).message}`);
+              }
+            }
+
             const parsed = this.processStreamLine(line, lineCount++, inTool);
             if (!parsed) continue;
 
@@ -232,6 +258,23 @@ export class ClaudeEngine implements InterruptibleEngine {
         }
 
         logger.info(`Claude engine (one-shot) exited with code ${code}`);
+
+        // T1A.PR4 follow-up: if the process exited (interrupted, crashed,
+        // or otherwise killed) before a result line landed and tool
+        // invocations are still in-flight per the parser, synthesize a
+        // cancelled finalize so the SessionResult cleanly closes the
+        // session_events log instead of dangling.
+        if (eventParser && opts.sessionId && eventParser.hasOrphanToolInvocations()) {
+          try {
+            const fin = eventParser.finalize(
+              "cancelled",
+              terminationReason || `process exited mid-tool (code=${code})`,
+            );
+            dispatchParserOutput(opts.sessionId, fin);
+          } catch (err) {
+            logger.debug(`[claude parser finalize on close] ${(err as Error).message}`);
+          }
+        }
 
         if (terminationReason) {
           resolve({
