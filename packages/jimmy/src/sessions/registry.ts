@@ -88,6 +88,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     model: (row.model as string) ?? null,
     title: (row.title as string) ?? null,
     parentSessionId: (row.parent_session_id as string) ?? null,
+    rootSessionId: (row.root_session_id as string) ?? (row.id as string),
     effortLevel: (row.effort_level as string) ?? null,
     status: row.status as Session['status'],
     totalCost: (row.total_cost as number) ?? 0,
@@ -191,6 +192,7 @@ export function migrateSessionsSchema(database: Database.Database): void {
   const missingColumns: Array<[string, string, string?]> = [
     ['title', 'TEXT'],
     ['parent_session_id', 'TEXT'],
+    ['root_session_id', 'TEXT'],
     ['connector', 'TEXT'],
     ['session_key', 'TEXT'],
     ['reply_context', 'TEXT'],
@@ -217,6 +219,31 @@ export function migrateSessionsSchema(database: Database.Database): void {
   if (refreshedNames.has('connector')) {
     database.exec(`UPDATE sessions SET connector = COALESCE(connector, source) WHERE connector IS NULL OR connector = ''`);
   }
+
+  // Lineage backfill (T1A.PR1). Walk parent pointers up to the root and
+  // copy the root id down. Idempotent: re-running on already-backfilled
+  // rows is a no-op because the WHERE filters on NULL.
+  if (refreshedNames.has('root_session_id') && refreshedNames.has('parent_session_id')) {
+    database.exec(`
+      WITH RECURSIVE roots(id, root_id) AS (
+        SELECT id, id FROM sessions WHERE parent_session_id IS NULL
+        UNION ALL
+        SELECT s.id, r.root_id FROM sessions s JOIN roots r ON s.parent_session_id = r.id
+      )
+      UPDATE sessions
+        SET root_session_id = (SELECT root_id FROM roots WHERE roots.id = sessions.id)
+        WHERE root_session_id IS NULL
+          AND id IN (SELECT id FROM roots);
+    `);
+    // Orphans (parent_session_id points at a deleted row) become their
+    // own root, so the invariant "root_session_id IS NOT NULL" holds.
+    database.exec(`UPDATE sessions SET root_session_id = id WHERE root_session_id IS NULL`);
+  }
+
+  // Indexes: parent powers the recursive CTE descent for mid-tree
+  // subscriptions; root powers the fast path when the caller is a root.
+  database.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)`);
+  database.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_session_id)`);
 }
 
 export interface CreateSessionOpts {
@@ -260,12 +287,25 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
   const replyContext = opts.replyContext ? JSON.stringify(opts.replyContext) : null;
   const transportMeta = opts.transportMeta ? JSON.stringify(opts.transportMeta) : null;
 
+  // Lineage (T1A.PR1): top-level sessions are their own root. Children
+  // inherit root_session_id from the parent so subtree queries can scope
+  // by root_session_id without walking parents at read time. If a parent
+  // is supplied but missing from the DB (e.g. deleted), fall back to
+  // self-as-root rather than crashing the spawn path.
+  let rootSessionId = id;
+  if (opts.parentSessionId) {
+    const parentRow = db
+      .prepare('SELECT root_session_id FROM sessions WHERE id = ?')
+      .get(opts.parentSessionId) as { root_session_id?: string } | undefined;
+    if (parentRow?.root_session_id) rootSessionId = parentRow.root_session_id;
+  }
+
   const stmt = db.prepare(`
     INSERT INTO sessions (
       id, engine, source, source_ref, connector, session_key, reply_context, message_id, transport_meta,
-      employee, model, title, parent_session_id, effort_level, status, created_at, last_activity
+      employee, model, title, parent_session_id, root_session_id, effort_level, status, created_at, last_activity
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?)
   `);
   stmt.run(
     id,
@@ -281,6 +321,7 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     opts.model ?? null,
     title,
     opts.parentSessionId ?? null,
+    rootSessionId,
     opts.effortLevel ?? null,
     now,
     now,
@@ -301,6 +342,7 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     model: opts.model ?? null,
     title,
     parentSessionId: opts.parentSessionId ?? null,
+    rootSessionId,
     effortLevel: opts.effortLevel ?? null,
     status: 'idle',
     totalCost: 0,
@@ -608,10 +650,10 @@ export function duplicateSession(sourceId: string, newTitle?: string): { session
       INSERT INTO sessions (
         id, engine, engine_session_id, source, source_ref, connector, session_key,
         reply_context, message_id, transport_meta,
-        employee, model, title, parent_session_id, effort_level, status,
+        employee, model, title, parent_session_id, root_session_id, effort_level, status,
         total_cost, total_turns, created_at, last_activity
       )
-      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'idle', 0, 0, ?, ?)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'idle', 0, 0, ?, ?)
     `).run(
       newId,
       source.engine,
@@ -625,6 +667,7 @@ export function duplicateSession(sourceId: string, newTitle?: string): { session
       source.employee,
       source.model,
       title,
+      newId,
       source.effortLevel,
       now,
       now,
