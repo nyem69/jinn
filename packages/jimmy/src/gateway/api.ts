@@ -33,6 +33,7 @@ import {
 } from "../sessions/registry.js";
 import { forkEngineSession } from "../sessions/fork.js";
 import { emitEvent } from "../events/emit.js";
+import { readEventsSingle, readEventsSubtree } from "../events/api.js";
 import {
   CONFIG_PATH,
   CRON_JOBS,
@@ -461,6 +462,37 @@ export async function handleApiRequest(
       logger.info(`Session deleted: ${params.id}`);
       context.emit("session:deleted", { sessionId: params.id });
       return json(res, { status: "deleted" });
+    }
+
+    // GET /api/sessions/:id/events — read the event log (T1A.PR2.B).
+    //
+    // Two modes:
+    // - Single-session: ?since_seq=<n>&limit=<m>, paginates per-session
+    //   monotonic seq. Stable cursor under sibling activity.
+    // - Subtree: ?include_children=true&after_id=<n>&limit=<m>,
+    //   paginates the GLOBAL id (auto-increment on session_events.id).
+    //   Required when reading a tree because per-session seq would drop
+    //   sibling-descendant events.
+    params = matchRoute("/api/sessions/:id/events", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+
+      const limitRaw = url.searchParams.get("limit");
+      const limit = limitRaw ? parseInt(limitRaw, 10) : undefined;
+      const includeChildren = url.searchParams.get("include_children") === "true";
+
+      if (includeChildren) {
+        const afterIdRaw = url.searchParams.get("after_id");
+        const afterId = afterIdRaw ? parseInt(afterIdRaw, 10) : undefined;
+        const result = readEventsSubtree(params.id, { afterId, limit });
+        return json(res, result);
+      }
+
+      const sinceSeqRaw = url.searchParams.get("since_seq");
+      const sinceSeq = sinceSeqRaw ? parseInt(sinceSeqRaw, 10) : undefined;
+      const result = readEventsSingle(params.id, { sinceSeq, limit });
+      return json(res, result);
     }
 
     // POST /api/sessions/:id/events — append an event to the session
