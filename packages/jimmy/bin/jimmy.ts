@@ -156,6 +156,26 @@ program
 }
 
 program
+  .command("replay <session-id>")
+  .description("Print replay context for a session checkpoint (T1A.PR5)")
+  .option("--from-step <n>", "Use the checkpoint at step_seq N (default: latest)")
+  .option("--branch <name>", "Source branch (default: 'main')")
+  .option("--to-branch <name>", "Destination branch name for the fork (default: auto)")
+  .option("--edit-prompt <file>", "Splice file contents into checkpoint.state.prompt")
+  .option("--print", "Output the full replay context as JSON")
+  .action(async (sessionId: string, opts: { fromStep?: string; branch?: string; toBranch?: string; editPrompt?: string; print?: boolean }) => {
+    const { runReplay } = await import("../src/cli/replay.js");
+    await runReplay({
+      sessionId,
+      fromStep: opts.fromStep ? parseInt(opts.fromStep, 10) : undefined,
+      branch: opts.branch,
+      toBranch: opts.toBranch,
+      editPrompt: opts.editPrompt,
+      print: opts.print,
+    });
+  });
+
+program
   .command("chrome-allow")
   .description("Pre-approve all sites for the Claude Chrome extension")
   .option("--no-restart", "Don't restart Chrome automatically")

@@ -35,6 +35,12 @@ import { forkEngineSession } from "../sessions/fork.js";
 import { emitAndDispatch } from "../events/emit.js";
 import { readEventsSingle, readEventsSubtree } from "../events/api.js";
 import {
+  writeCheckpoint,
+  listCheckpoints,
+  readCheckpoint,
+  buildReplayContext,
+} from "../sessions/checkpoint.js";
+import {
   startSseStream,
   parseLastEventId,
   resolveSingleCursorFromLastEventId,
@@ -605,6 +611,79 @@ export async function handleApiRequest(
       } else {
         return json(res, result.event, 201);
       }
+    }
+
+    // GET /api/sessions/:id/checkpoints — list checkpoints for a session
+    // (T1A.PR5). Optional ?branch=<name> filter; otherwise returns
+    // checkpoints across all branches ordered by branch then step_seq.
+    params = matchRoute("/api/sessions/:id/checkpoints", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const branch = url.searchParams.get("branch") ?? undefined;
+      const checkpoints = listCheckpoints(params.id, { branch });
+      return json(res, { checkpoints });
+    }
+
+    // POST /api/sessions/:id/checkpoints — write a checkpoint.
+    // Internal-only (gateway loopback). Body: { step_seq, branch?, state }.
+    if (method === "POST" && params) {
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
+      if (typeof body?.step_seq !== "number" || !Number.isInteger(body.step_seq) || body.step_seq < 0) {
+        return badRequest(res, "step_seq must be a non-negative integer");
+      }
+      if (body?.state == null || typeof body.state !== "object") {
+        return badRequest(res, "state must be an object");
+      }
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      try {
+        const result = writeCheckpoint({
+          sessionId: params.id,
+          stepSeq: body.step_seq,
+          branch: typeof body.branch === "string" ? body.branch : undefined,
+          state: body.state,
+        });
+        return json(res, result, result.dedup ? 200 : 201);
+      } catch (e) {
+        return badRequest(res, (e as Error).message);
+      }
+    }
+
+    // GET /api/sessions/:id/checkpoints/:step — read one checkpoint by
+    // (branch, step_seq). branch defaults to 'main' via query param.
+    params = matchRoute("/api/sessions/:id/checkpoints/:step", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const stepSeq = parseInt(params.step, 10);
+      if (!Number.isFinite(stepSeq) || stepSeq < 0) return badRequest(res, "invalid step");
+      const branch = url.searchParams.get("branch") ?? undefined;
+      const cp = readCheckpoint(params.id, { branch, stepSeq });
+      if (!cp) return notFound(res);
+      return json(res, cp);
+    }
+
+    // GET /api/sessions/:id/replay — build a replay context (does NOT
+    // spawn anything; that's the caller's job). Returns the checkpoint
+    // + tool sequence + session metadata + suggested next branch name.
+    params = matchRoute("/api/sessions/:id/replay", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const branch = url.searchParams.get("branch") ?? undefined;
+      const fromStepRaw = url.searchParams.get("from_step");
+      const fromStep = fromStepRaw ? parseInt(fromStepRaw, 10) : undefined;
+      const toBranch = url.searchParams.get("to_branch") ?? undefined;
+      const ctx = buildReplayContext(params.id, { branch, fromStep, toBranch });
+      if (!ctx.ok) {
+        if (ctx.reason === "unknown_session") return notFound(res);
+        return json(res, ctx, ctx.reason === "step_out_of_bounds" ? 400 : 404);
+      }
+      return json(res, ctx);
     }
 
     // POST /api/sessions/:id/stop

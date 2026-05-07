@@ -7,6 +7,7 @@ import { SESSIONS_DB } from '../shared/paths.js';
 import type { JsonObject, ReplyContext, Session } from '../shared/types.js';
 import { initEventsSchema } from '../events/db.js';
 import { initHandlerRegistry } from '../events/handlers.js';
+import { initCheckpointsSchema } from './checkpoint.js';
 
 let db: Database.Database;
 
@@ -168,6 +169,8 @@ export function initDb(): Database.Database {
   // T1A.PR2.D — seed default handler rows so dispatchEventHandlers
   // finds them. Idempotent via UNIQUE(kind_filter, processor) index.
   initHandlerRegistry(db);
+  // T1A.PR5 — checkpoints table for replay reconstruction.
+  initCheckpointsSchema(db);
 
   return db;
 }
