@@ -272,6 +272,67 @@ export interface CreateSessionOpts {
   title?: string;
   parentSessionId?: string;
   effortLevel?: string;
+  // T1A.PR5 follow-up: when set together with parentSessionId, write a
+  // checkpoint on the parent session immediately after the child row is
+  // inserted. Best-effort — a checkpoint write failure does NOT block
+  // the spawn; a debug log is emitted instead. Caller-supplied stepSeq
+  // wins; absent that, we use a per-branch monotonic counter so the
+  // unique (session, branch, step_seq) index never collides on rapid
+  // back-to-back spawns. (To align step_seq with session_events.seq for
+  // PR5's replay slice query, the caller should pass stepSeq = max seq
+  // on the parent session at write time.)
+  checkpoint?: {
+    state: Record<string, unknown>;
+    stepSeq?: number;
+    branch?: string;
+  };
+}
+
+// Writes a spawn-time checkpoint on a parent session. Step_seq defaults
+// to (existing checkpoint count on this branch) + 1 — a per-branch
+// monotonic counter that never collides on rapid back-to-back spawns.
+// Caller-supplied stepSeq always wins so PR5 replay clients that want
+// session_events.seq alignment can pass it through.
+//
+// Exported so unit tests can drive it against an in-memory DB without
+// going through initDb()/the on-disk sessions registry.
+export function writeSpawnCheckpoint(
+  db: Database.Database,
+  parentSessionId: string,
+  newChildSessionId: string,
+  spec: { state: Record<string, unknown>; stepSeq?: number; branch?: string },
+): void {
+  const branch = spec.branch ?? 'main';
+  let stepSeq = spec.stepSeq;
+  if (typeof stepSeq !== 'number') {
+    const row = db
+      .prepare(
+        'SELECT COUNT(*) AS n FROM session_checkpoints WHERE session_id = ? AND branch = ?',
+      )
+      .get(parentSessionId, branch) as { n: number };
+    stepSeq = row.n + 1;
+  }
+
+  // Augment the caller's state with the spawn linkage so replay can
+  // identify which child this checkpoint corresponds to without parsing
+  // session_events. The caller's keys win on conflict.
+  const augmentedState = {
+    spawned_child_session_id: newChildSessionId,
+    spawned_at: new Date().toISOString(),
+    ...spec.state,
+  };
+
+  const stateJson = JSON.stringify(augmentedState);
+  // 2 MB cap matches checkpoint.ts; duplicated here so the spawn path
+  // stays self-contained and doesn't reach into the checkpoint module.
+  if (Buffer.byteLength(stateJson, 'utf-8') > 2 * 1024 * 1024) {
+    throw new Error('spawn checkpoint state exceeds 2 MB');
+  }
+
+  db.prepare(
+    `INSERT OR IGNORE INTO session_checkpoints (session_id, step_seq, branch, state)
+     VALUES (?, ?, ?, ?)`,
+  ).run(parentSessionId, stepSeq, branch, stateJson);
 }
 
 function getNextSessionNumber(): number {
@@ -338,6 +399,27 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     now,
     now,
   );
+
+  // T1A.PR5 follow-up: spawn-time checkpoint hook. When the caller
+  // supplies state and the new session has a parent, write a checkpoint
+  // on the parent so replay can later resume from this delegation
+  // boundary. step_seq defaults to a per-branch monotonic counter to
+  // avoid colliding with rapid back-to-back spawns; callers that want
+  // alignment with session_events.seq for replay's tool-slice query
+  // should pass stepSeq explicitly. Best-effort: a write failure logs
+  // at debug and the spawn proceeds.
+  if (opts.checkpoint && opts.parentSessionId) {
+    try {
+      writeSpawnCheckpoint(db, opts.parentSessionId, id, opts.checkpoint);
+    } catch (err) {
+      // Lazy import for logger to avoid the cycle that would arise if
+      // logger ever pulled registry transitively.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      import('../shared/logger.js').then(({ logger }) => {
+        logger.debug(`[spawn-checkpoint] write failed: ${(err as Error).message}`);
+      }).catch(() => undefined);
+    }
+  }
 
   return {
     id,
