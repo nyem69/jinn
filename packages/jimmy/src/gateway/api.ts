@@ -35,6 +35,12 @@ import { forkEngineSession } from "../sessions/fork.js";
 import { emitEvent } from "../events/emit.js";
 import { readEventsSingle, readEventsSubtree } from "../events/api.js";
 import {
+  startSseStream,
+  parseLastEventId,
+  resolveSingleCursorFromLastEventId,
+  type SseClient,
+} from "../events/sse.js";
+import {
   CONFIG_PATH,
   CRON_JOBS,
   CRON_RUNS,
@@ -493,6 +499,84 @@ export async function handleApiRequest(
       const sinceSeq = sinceSeqRaw ? parseInt(sinceSeqRaw, 10) : undefined;
       const result = readEventsSingle(params.id, { sinceSeq, limit });
       return json(res, result);
+    }
+
+    // GET /api/sessions/:id/events/stream — SSE live tail (T1A.PR2.C).
+    //
+    // Two modes mirror the read API:
+    // - ?since_seq=<n> (default): single-session stream paginated on
+    //   per-session seq.
+    // - ?include_children=true&after_id=<n>: subtree stream paginated
+    //   on the global session_events.id. Required to read a tree
+    //   without dropping sibling-descendant events.
+    //
+    // Reconnect: clients send Last-Event-ID (the global id we set on
+    // each frame). In subtree mode we use it directly; in single mode
+    // we look up the row's seq and resume there.
+    params = matchRoute("/api/sessions/:id/events/stream", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+
+      const includeChildren = url.searchParams.get("include_children") === "true";
+      const lastEventId = parseLastEventId(req.headers["last-event-id"]);
+      const db = initDb();
+
+      let cursorSeq: number | undefined;
+      let cursorId: number | undefined;
+      if (includeChildren) {
+        const afterIdRaw = url.searchParams.get("after_id");
+        cursorId = afterIdRaw ? parseInt(afterIdRaw, 10) : 0;
+        if (lastEventId !== undefined) cursorId = lastEventId;
+      } else {
+        const sinceSeqRaw = url.searchParams.get("since_seq");
+        cursorSeq = sinceSeqRaw ? parseInt(sinceSeqRaw, 10) : 0;
+        if (lastEventId !== undefined) {
+          const resolved = resolveSingleCursorFromLastEventId(db, params.id, lastEventId);
+          if (resolved !== undefined) cursorSeq = resolved;
+        }
+      }
+
+      // SSE headers: text/event-stream + no-cache + keep-alive.
+      // Disable proxy buffering via X-Accel-Buffering for nginx-like
+      // reverse proxies; harmless on direct loopback access.
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      // Initial empty comment line nudges the client to stop buffering
+      // and start parsing — cheap, idiomatic for SSE.
+      res.write(": ok\n\n");
+
+      const client: SseClient = {
+        write: (chunk) => res.write(chunk),
+        end: () => {
+          try {
+            res.end();
+          } catch {
+            // ignore
+          }
+        },
+        onClose: (handler) => {
+          req.on("close", handler);
+          res.on("close", handler);
+        },
+        onDrain: (handler) => {
+          res.on("drain", handler);
+        },
+      };
+
+      startSseStream(db, client, {
+        mode: includeChildren ? "subtree" : "single",
+        sessionId: params.id,
+        cursorSeq,
+        cursorId,
+      });
+      // Don't return json/notFound — the response stays open for the
+      // lifetime of the stream.
+      return;
     }
 
     // POST /api/sessions/:id/events — append an event to the session
