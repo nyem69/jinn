@@ -151,6 +151,7 @@ export interface Session {
   model: string | null;
   title: string | null;
   parentSessionId: string | null;
+  rootSessionId: string;
   status: "idle" | "running" | "error" | "waiting" | "interrupted";
   effortLevel: string | null;
   totalCost: number;
