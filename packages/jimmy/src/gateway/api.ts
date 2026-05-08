@@ -333,6 +333,54 @@ function serializeSession(session: Session, context: ApiContext): Session {
   };
 }
 
+// T1A.PR8 follow-up: when a delegation creates a child session
+// (parentSessionId set), we always want a checkpoint row on the parent
+// so the replay-invocations metric in `jinn t1a-status` actually moves
+// off zero. Callers that supply `body.checkpoint` get full control;
+// otherwise we synthesise the minimum useful state (persona + prompt)
+// from fields we already have. step_seq defaults to the parent's
+// current max(session_events.seq) so PR5's tool-slice query window is
+// well-defined; absent any events yet, falls through to the per-branch
+// monotonic counter inside writeSpawnCheckpoint.
+export function buildSpawnCheckpointSpec(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  body: any | undefined,
+  defaults: {
+    employee?: string;
+    prompt?: string;
+    extra?: Record<string, unknown>;
+  },
+): { state: Record<string, unknown>; stepSeq?: number; branch?: string } | undefined {
+  const callerCheckpoint = body?.checkpoint;
+  // Caller passed nothing AND we have nothing baseline-worthy → skip.
+  if (!callerCheckpoint && !defaults.employee && !defaults.prompt && !defaults.extra) {
+    return undefined;
+  }
+
+  const baseState: Record<string, unknown> = {};
+  if (defaults.employee) baseState.persona = defaults.employee;
+  if (defaults.prompt) baseState.prompt = defaults.prompt;
+  if (defaults.extra) Object.assign(baseState, defaults.extra);
+
+  const callerState = (callerCheckpoint?.state ?? {}) as Record<string, unknown>;
+  const state = { ...baseState, ...callerState };
+
+  const branch = callerCheckpoint?.branch;
+  let stepSeq: number | undefined = callerCheckpoint?.stepSeq;
+  if (typeof stepSeq !== "number" && body?.parentSessionId) {
+    try {
+      const row = initDb()
+        .prepare("SELECT COALESCE(MAX(seq), 0) AS n FROM session_events WHERE session_id = ?")
+        .get(body.parentSessionId) as { n: number };
+      if (row.n > 0) stepSeq = row.n;
+    } catch {
+      // Fall through; writeSpawnCheckpoint will use its monotonic counter.
+    }
+  }
+
+  return { state, stepSeq, branch };
+}
+
 function checkInstanceHealth(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const req = http.request({ hostname: "localhost", port, path: "/api/status", timeout: 2000 }, (res) => {
@@ -937,6 +985,7 @@ export async function handleApiRequest(
         model: body.model,
         prompt,
         portalName: config.portal?.portalName,
+        checkpoint: buildSpawnCheckpointSpec(body, { employee: body.employee, prompt }),
       });
       logger.info(`Web session created: ${session.id} (model=${body.model || "default"})`);
       insertMessage(session.id, "user", prompt);
@@ -1395,6 +1444,18 @@ Handle this as a priority request from a colleague.`;
         prompt: crossBrief,
         portalName: config.portal?.portalName,
         title: `Cross-request: ${fromEmployee} → ${service}`,
+        checkpoint: buildSpawnCheckpointSpec(undefined, {
+          employee: entry.provider.name,
+          prompt: crossBrief,
+          extra: {
+            cross_request: {
+              from_employee: fromEmployee,
+              service,
+              route,
+              managers: managers.map((m) => m.employee.name),
+            },
+          },
+        }),
       });
       insertMessage(session.id, "user", crossBrief);
       logger.info(`Cross-request session created: ${session.id} (${fromEmployee} → ${service} → ${entry.provider.name})`);
