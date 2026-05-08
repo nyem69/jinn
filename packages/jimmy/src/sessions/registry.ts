@@ -600,16 +600,27 @@ export function accumulateSessionCost(id: string, cost: number, turns: number): 
 }
 
 /**
- * Insert a row into cost_log for the given session. Looks up the session's
- * source/source_ref to populate trigger_type + trigger_ref accurately.
+ * Insert a row into cost_log for the given session.
  *
- * Called from the gateway's session-completion path. The CLAUDE.md
- * auto-housekeeping protocol used to ask skills to do this in bash;
- * gateway-side logging makes it automatic + reliable.
+ * As of T1A.PR2.D, the canonical writer for cost_log is the
+ * `cost_log` event handler, which fires off `session_completed` and
+ * carries token counts from the engine's reported usage. This legacy
+ * function still runs on the post-session path in manager.ts, but
+ * dedupes against the handler row: if a cost_log row already exists
+ * for this session_id, we skip. That covers two cases cleanly:
  *
- * Token counts are NULL — Claude's `total_cost_usd` is the authoritative
- * cost, computed by Anthropic with their actual rates. Tokens can be
- * threaded through later if a use case needs them.
+ *   - T1A path (parser transport != 'off'): handler writes first with
+ *     tokens; this function sees the existing row and skips. The
+ *     observability surface stays single-row-per-session with full
+ *     token attribution.
+ *
+ *   - Legacy path (parser off, or non-streaming engine, or handler
+ *     failed): no row exists yet; this function inserts as before
+ *     with NULL tokens. cost_usd is still authoritative because
+ *     Anthropic's reported total_cost_usd is the source of truth.
+ *
+ * Looks up source/source_ref to populate trigger_type + trigger_ref
+ * accurately when we do insert.
  */
 export function logSessionCost(opts: {
   sessionId: string;
@@ -619,6 +630,17 @@ export function logSessionCost(opts: {
   costUsd: number;
 }): void {
   const db = initDb();
+
+  // Dedup against the T1A handler. Robust to handler failures (no row
+  // → fall through to legacy insert). Ordering: emit→dispatch happens
+  // synchronously inside the engine adapter via queueMicrotask, so the
+  // handler row lands before manager.ts gets the engine result back
+  // and calls us.
+  const existing = db
+    .prepare('SELECT 1 FROM cost_log WHERE session_id = ? LIMIT 1')
+    .get(opts.sessionId);
+  if (existing) return;
+
   // Look up source/source_ref so we know whether this was cron, user,
   // delegation, eval, etc.
   const sessRow = db
