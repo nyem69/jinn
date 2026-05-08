@@ -156,6 +156,16 @@ program
 }
 
 program
+  .command("t1a-status")
+  .description("T1A soak snapshot: events, DLQ, handlers, cost_log autofill")
+  .option("--since <iso>", "Window start (ISO datetime). Default: 24h ago")
+  .option("--json", "Emit machine-readable JSON instead of the human report")
+  .action(async (opts: { since?: string; json?: boolean }) => {
+    const { runT1aStatus } = await import("../src/cli/t1a-status.js");
+    await runT1aStatus({ since: opts.since, json: opts.json });
+  });
+
+program
   .command("replay <session-id>")
   .description("Print replay context for a session checkpoint (T1A.PR5)")
   .option("--from-step <n>", "Use the checkpoint at step_seq N (default: latest)")

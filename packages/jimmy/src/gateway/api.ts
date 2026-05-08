@@ -363,6 +363,14 @@ export async function handleApiRequest(
       const connectors = Object.fromEntries(
         Array.from(context.connectors.values()).map((connector) => [connector.name, connector.getHealth()]),
       );
+      // T1A.PR4 follow-up: surface the parser transport so external
+      // clients (CLIs, observability) read the gateway's actual env
+      // instead of guessing from their own process.env.
+      const claudeEventTransport = (() => {
+        const v = (process.env.JIN_CLAUDE_EVENT_TRANSPORT || "").toLowerCase();
+        if (v === "sideband" || v === "stdout") return v;
+        return "off";
+      })();
       return json(res, {
         status: "ok",
         uptime: Math.floor((Date.now() - context.startTime) / 1000),
@@ -375,6 +383,9 @@ export async function handleApiRequest(
         },
         sessions: { total: sessions.length, running, active: running },
         connectors,
+        features: {
+          claude_event_transport: claudeEventTransport,
+        },
       });
     }
 
