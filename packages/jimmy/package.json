@@ -11,14 +11,16 @@
   "types": "./dist/src/index.d.ts",
   "files": [
     "dist/",
-    "template/"
+    "template/",
+    "migrations/"
   ],
   "scripts": {
-    "build": "tsc && rm -rf dist/web && cp -r ../web/out dist/web 2>/dev/null || true",
+    "build": "tsc && rm -rf dist/web && cp -r ../web/out dist/web 2>/dev/null || true && rm -rf dist/migrations && cp -r migrations dist/migrations",
     "dev": "tsc && (tsc --watch &) && node --watch-path=dist dist/bin/jimmy.js start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:migrations": "vitest run src/sessions/__tests__/migrate-runner.test.ts src/cli/__tests__/db.test.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

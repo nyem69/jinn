@@ -18,28 +18,9 @@ import {
 
 function freshDb(): Database.Database {
   const db = new Database(":memory:");
-  db.prepare(`
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY,
-      engine TEXT NOT NULL,
-      engine_session_id TEXT,
-      source TEXT NOT NULL,
-      source_ref TEXT NOT NULL,
-      connector TEXT,
-      session_key TEXT,
-      reply_context TEXT,
-      message_id TEXT,
-      transport_meta TEXT,
-      employee TEXT,
-      model TEXT,
-      title TEXT,
-      parent_session_id TEXT,
-      status TEXT DEFAULT 'idle',
-      created_at TEXT NOT NULL,
-      last_activity TEXT NOT NULL,
-      last_error TEXT
-    )
-  `).run();
+  // Schema is owned by the migration runner; migrateSessionsSchema (compat
+  // shim) applies every baseline migration. The trailing initEventsSchema
+  // call is a no-op kept for documentation parity.
   migrateSessionsSchema(db);
   initEventsSchema(db);
   return db;

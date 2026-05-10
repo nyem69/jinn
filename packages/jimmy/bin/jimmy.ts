@@ -100,6 +100,37 @@ program
     await runMigrate(opts);
   });
 
+// jinn db apply | rollback <version> | status — schema migrations
+{
+  const dbCmd = program
+    .command("db")
+    .description("Schema migrations for sessions/registry.db");
+
+  dbCmd
+    .command("apply")
+    .description("Apply pending schema migrations")
+    .action(async () => {
+      const { dbApply } = await import("../src/cli/db.js");
+      await dbApply();
+    });
+
+  dbCmd
+    .command("rollback <version>")
+    .description("Roll back all migrations newer than <version>. Use __ROLLBACK_ALL__ to revert everything.")
+    .action(async (version: string) => {
+      const { dbRollback } = await import("../src/cli/db.js");
+      await dbRollback({ target: version });
+    });
+
+  dbCmd
+    .command("status")
+    .description("Show applied vs pending schema migrations")
+    .action(async () => {
+      const { dbStatus } = await import("../src/cli/db.js");
+      await dbStatus();
+    });
+}
+
 // Skills subcommands (jinn skills find|add|remove|list|update|restore)
 {
   const skillsCmd = program
