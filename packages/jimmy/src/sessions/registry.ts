@@ -5,61 +5,9 @@ import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { SESSIONS_DB } from '../shared/paths.js';
 import type { JsonObject, ReplyContext, Session } from '../shared/types.js';
-import { initEventsSchema } from '../events/db.js';
-import { initHandlerRegistry } from '../events/handlers.js';
-import { initCheckpointsSchema } from './checkpoint.js';
+import { applyPendingMigrations } from './migrate-runner.js';
 
 let db: Database.Database;
-
-const CREATE_TABLE = `
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  engine TEXT NOT NULL,
-  engine_session_id TEXT,
-  source TEXT NOT NULL,
-  source_ref TEXT NOT NULL,
-  connector TEXT,
-  session_key TEXT,
-  reply_context TEXT,
-  message_id TEXT,
-  transport_meta TEXT,
-  employee TEXT,
-  model TEXT,
-  title TEXT,
-  parent_session_id TEXT,
-  status TEXT DEFAULT 'idle',
-  created_at TEXT NOT NULL,
-  last_activity TEXT NOT NULL,
-  last_error TEXT
-)`;
-
-const CREATE_MESSAGES_TABLE = `
-CREATE TABLE IF NOT EXISTS messages (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  timestamp INTEGER NOT NULL
-)`;
-
-const CREATE_MESSAGES_INDEX = `
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, timestamp)
-`;
-
-const CREATE_SESSION_KEY_INDEX = `
-CREATE INDEX IF NOT EXISTS idx_sessions_session_key ON sessions (session_key, last_activity)
-`;
-
-const CREATE_FILES_TABLE = `
-CREATE TABLE IF NOT EXISTS files (
-  id TEXT PRIMARY KEY,
-  filename TEXT NOT NULL,
-  size INTEGER NOT NULL,
-  mimetype TEXT,
-  path TEXT,
-  created_at TEXT NOT NULL
-)
-`;
 
 function parseJsonObject(value: unknown): JsonObject | null {
   if (typeof value !== 'string' || !value.trim()) return null;
@@ -107,155 +55,16 @@ export function initDb(): Database.Database {
   mkdirSync(path.dirname(SESSIONS_DB), { recursive: true });
   db = new Database(SESSIONS_DB);
   db.pragma('journal_mode = WAL');
-  db.exec(CREATE_TABLE);
-  db.exec(CREATE_MESSAGES_TABLE);
-  db.exec(CREATE_MESSAGES_INDEX);
-  migrateSessionsSchema(db);
-  db.exec(CREATE_SESSION_KEY_INDEX);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS queue_items (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      session_key TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      position INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      started_at TEXT,
-      completed_at TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_queue_session
-      ON queue_items (session_key, status, position);
-  `);
-  db.exec(CREATE_FILES_TABLE);
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS goals (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      description TEXT,
-      status TEXT NOT NULL DEFAULT 'not_started',
-      level TEXT NOT NULL DEFAULT 'company',
-      parent_id TEXT,
-      department TEXT,
-      owner TEXT,
-      progress INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (parent_id) REFERENCES goals(id)
-    )
-  `);
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS budget_events (
-      id TEXT PRIMARY KEY,
-      employee TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      amount REAL NOT NULL,
-      limit_amount REAL NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-
-  // Episode candidates — gateway-side auto-seeded rows for sessions
-  // that look like substantive multi-agent or analytical work. A weekly
-  // grading cron reads these, runs LLM judgment, and either promotes
-  // them to a curated row in the `episodes` table or marks them rejected.
-  db.exec(EPISODE_CANDIDATES_SCHEMA);
-
-  // T1A.PR2 — append-only event log + handler registry + DLQ. Lives
-  // in its own module so the events surface stays self-contained.
-  initEventsSchema(db);
-  // T1A.PR2.D — seed default handler rows so dispatchEventHandlers
-  // finds them. Idempotent via UNIQUE(kind_filter, processor) index.
-  initHandlerRegistry(db);
-  // T1A.PR5 — checkpoints table for replay reconstruction.
-  initCheckpointsSchema(db);
-
+  applyPendingMigrations(db);
   return db;
 }
 
-const EPISODE_CANDIDATES_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS episode_candidates (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    parent_session_id TEXT,
-    employee TEXT,
-    trigger_type TEXT,
-    trigger_ref TEXT,
-    cost_usd REAL,
-    num_turns INTEGER,
-    num_children INTEGER,
-    prompt_excerpt TEXT,
-    result_excerpt TEXT,
-    promoted_episode_id TEXT,
-    promoted_at TEXT,
-    rejected_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE INDEX IF NOT EXISTS idx_ec_pending
-    ON episode_candidates (created_at)
-    WHERE promoted_at IS NULL AND rejected_at IS NULL;
-`;
-
+/**
+ * @deprecated Compat shim. Schema is owned by `applyPendingMigrations`.
+ * Existing tests call this directly; new code should call applyPendingMigrations.
+ */
 export function migrateSessionsSchema(database: Database.Database): void {
-  const cols = database.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
-  const colNames = new Set(cols.map((c) => c.name));
-  const missingColumns: Array<[string, string, string?]> = [
-    ['title', 'TEXT'],
-    ['parent_session_id', 'TEXT'],
-    ['root_session_id', 'TEXT'],
-    ['connector', 'TEXT'],
-    ['session_key', 'TEXT'],
-    ['reply_context', 'TEXT'],
-    ['message_id', 'TEXT'],
-    ['transport_meta', 'TEXT'],
-    ['total_cost', 'REAL', '0'],
-    ['total_turns', 'INTEGER', '0'],
-    ['effort_level', 'TEXT'],
-    ['compacted_at', 'TEXT'],
-  ];
-
-  for (const [name, type, defaultVal] of missingColumns) {
-    if (!colNames.has(name)) {
-      const defaultClause = defaultVal !== undefined ? ` DEFAULT ${defaultVal}` : '';
-      database.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}${defaultClause}`);
-    }
-  }
-
-  const refreshedCols = database.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
-  const refreshedNames = new Set(refreshedCols.map((c) => c.name));
-  if (refreshedNames.has('session_key')) {
-    database.exec(`UPDATE sessions SET session_key = COALESCE(session_key, source_ref) WHERE session_key IS NULL OR session_key = ''`);
-  }
-  if (refreshedNames.has('connector')) {
-    database.exec(`UPDATE sessions SET connector = COALESCE(connector, source) WHERE connector IS NULL OR connector = ''`);
-  }
-
-  // Lineage backfill (T1A.PR1). Walk parent pointers up to the root and
-  // copy the root id down. Idempotent: re-running on already-backfilled
-  // rows is a no-op because the WHERE filters on NULL.
-  if (refreshedNames.has('root_session_id') && refreshedNames.has('parent_session_id')) {
-    database.exec(`
-      WITH RECURSIVE roots(id, root_id) AS (
-        SELECT id, id FROM sessions WHERE parent_session_id IS NULL
-        UNION ALL
-        SELECT s.id, r.root_id FROM sessions s JOIN roots r ON s.parent_session_id = r.id
-      )
-      UPDATE sessions
-        SET root_session_id = (SELECT root_id FROM roots WHERE roots.id = sessions.id)
-        WHERE root_session_id IS NULL
-          AND id IN (SELECT id FROM roots);
-    `);
-    // Orphans (parent_session_id points at a deleted row) become their
-    // own root, so the invariant "root_session_id IS NOT NULL" holds.
-    database.exec(`UPDATE sessions SET root_session_id = id WHERE root_session_id IS NULL`);
-  }
-
-  // Indexes: parent powers the recursive CTE descent for mid-tree
-  // subscriptions; root powers the fast path when the caller is a root.
-  database.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)`);
-  database.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(root_session_id)`);
+  applyPendingMigrations(database);
 }
 
 export interface CreateSessionOpts {

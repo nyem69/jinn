@@ -7,6 +7,7 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import type { SessionEventRow } from './db.js';
 import { recordDlqFailure, activeDlqDepth } from './dlq.js';
+import { applyPendingMigrations } from '../sessions/migrate-runner.js';
 
 // T1A.PR2.D: default event handlers.
 //
@@ -332,20 +333,14 @@ export function loadHandlersFlagConfig(): HandlersFlagConfig {
   }
 }
 
-// Idempotent seed of (kind, processor) rows in event_handlers. Call
-// from initDb() after initEventsSchema(). Adds a unique index lazily so
-// the seed inserts don't duplicate on every boot.
+/**
+ * @deprecated Compat shim. Default handler seed is owned by `applyPendingMigrations`
+ * (see `0006_handlers_seed.up.sql`). The seed pulls handler kinds from the
+ * `DEFAULT_HANDLERS` array exported above; the SQL file embeds the same set so
+ * fresh databases come up with the seven default rows pre-seeded.
+ */
 export function initHandlerRegistry(db: Database.Database): void {
-  db.prepare(
-    'CREATE UNIQUE INDEX IF NOT EXISTS uniq_event_handlers_kind_processor ON event_handlers (kind_filter, processor)',
-  ).run();
-  for (const spec of DEFAULT_HANDLERS) {
-    for (const kind of spec.kinds) {
-      db.prepare(
-        'INSERT OR IGNORE INTO event_handlers (kind_filter, processor) VALUES (?, ?)',
-      ).run(kind, spec.name);
-    }
-  }
+  applyPendingMigrations(db);
 }
 
 export interface DispatchResult {

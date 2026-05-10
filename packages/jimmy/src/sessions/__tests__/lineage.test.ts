@@ -3,42 +3,53 @@ import Database from "better-sqlite3";
 import { migrateSessionsSchema } from "../registry.js";
 
 // PR1 covers the schema/backfill side of lineage. createSession() goes through
-// initDb() and the global SESSIONS_DB path, so we exercise the migrator
-// directly here against an in-memory DB rather than reaching into the real
-// sessions DB on disk.
+// initDb() and the global SESSIONS_DB path, so we exercise the lineage
+// backfill SQL directly here against an in-memory DB rather than reaching
+// into the real sessions DB on disk.
+//
+// Schema is now owned by the SQL-file migration runner. Each test calls
+// migrateSessionsSchema(db) (a compat shim that runs all baseline migrations)
+// to create the full schema, then inserts rows with root_session_id=NULL to
+// simulate legacy data, and finally re-runs the backfill SQL to verify the
+// CTE walk lands the right roots. The backfill SQL is duplicated here from
+// 0003_lineage.up.sql — that's intentional, since the test asserts on the
+// behaviour of THAT SQL, not on the migration framework that ships it.
+
+const LINEAGE_BACKFILL_SQL = `
+  WITH RECURSIVE roots(id, root_id) AS (
+    SELECT id, id FROM sessions WHERE parent_session_id IS NULL
+    UNION ALL
+    SELECT s.id, r.root_id FROM sessions s JOIN roots r ON s.parent_session_id = r.id
+  )
+  UPDATE sessions
+    SET root_session_id = (SELECT root_id FROM roots WHERE roots.id = sessions.id)
+    WHERE root_session_id IS NULL
+      AND id IN (SELECT id FROM roots);
+`;
+
+const ORPHAN_FALLBACK_SQL = `
+  UPDATE sessions SET root_session_id = id WHERE root_session_id IS NULL;
+`;
 
 function freshDb(): Database.Database {
   const db = new Database(":memory:");
-  db.prepare(`
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY,
-      engine TEXT NOT NULL,
-      engine_session_id TEXT,
-      source TEXT NOT NULL,
-      source_ref TEXT NOT NULL,
-      connector TEXT,
-      session_key TEXT,
-      reply_context TEXT,
-      message_id TEXT,
-      transport_meta TEXT,
-      employee TEXT,
-      model TEXT,
-      title TEXT,
-      parent_session_id TEXT,
-      status TEXT DEFAULT 'idle',
-      created_at TEXT NOT NULL,
-      last_activity TEXT NOT NULL,
-      last_error TEXT
-    )
-  `).run();
+  migrateSessionsSchema(db);
   return db;
 }
 
 function insertRaw(db: Database.Database, id: string, parent: string | null): void {
+  // Insert as a "legacy" row: parent_session_id filled but root_session_id NULL,
+  // mirroring the on-disk state a database in production would be in just
+  // before 0003 fired.
   db.prepare(`
-    INSERT INTO sessions (id, engine, source, source_ref, parent_session_id, created_at, last_activity)
-    VALUES (?, 'claude', 'test', ?, ?, '2026-05-07T00:00:00.000Z', '2026-05-07T00:00:00.000Z')
+    INSERT INTO sessions (id, engine, source, source_ref, parent_session_id, root_session_id, created_at, last_activity)
+    VALUES (?, 'claude', 'test', ?, ?, NULL, '2026-05-07T00:00:00.000Z', '2026-05-07T00:00:00.000Z')
   `).run(id, `test:${id}`, parent);
+}
+
+function runBackfill(db: Database.Database): void {
+  db.prepare(LINEAGE_BACKFILL_SQL).run();
+  db.prepare(ORPHAN_FALLBACK_SQL).run();
 }
 
 describe("lineage backfill", () => {
@@ -47,7 +58,7 @@ describe("lineage backfill", () => {
     insertRaw(db, "a", null);
     insertRaw(db, "b", null);
 
-    migrateSessionsSchema(db);
+    runBackfill(db);
 
     const rows = db.prepare("SELECT id, root_session_id FROM sessions ORDER BY id").all() as Array<{
       id: string;
@@ -66,7 +77,7 @@ describe("lineage backfill", () => {
     insertRaw(db, "grandchild", "child");
     insertRaw(db, "great-grandchild", "grandchild");
 
-    migrateSessionsSchema(db);
+    runBackfill(db);
 
     const rows = db.prepare("SELECT id, root_session_id FROM sessions ORDER BY id").all() as Array<{
       id: string;
@@ -84,7 +95,7 @@ describe("lineage backfill", () => {
     // No row with id="ghost" — child is an orphan.
     insertRaw(db, "orphan", "ghost");
 
-    migrateSessionsSchema(db);
+    runBackfill(db);
 
     const row = db.prepare("SELECT root_session_id FROM sessions WHERE id = ?").get("orphan") as
       | { root_session_id: string }
@@ -101,7 +112,7 @@ describe("lineage backfill", () => {
     insertRaw(db, "c2", "r1");
     insertRaw(db, "lonely", null);
 
-    migrateSessionsSchema(db);
+    runBackfill(db);
 
     const nullCount = db
       .prepare("SELECT count(*) AS n FROM sessions WHERE root_session_id IS NULL")
@@ -111,7 +122,6 @@ describe("lineage backfill", () => {
 
   it("creates idx_sessions_parent and idx_sessions_root", () => {
     const db = freshDb();
-    migrateSessionsSchema(db);
 
     const idx = db.prepare("PRAGMA index_list(sessions)").all() as Array<{ name: string }>;
     const names = new Set(idx.map((i) => i.name));
@@ -127,7 +137,7 @@ describe("lineage backfill", () => {
     insertRaw(db, "c", "b");
     insertRaw(db, "d", "c");
 
-    migrateSessionsSchema(db);
+    runBackfill(db);
 
     // Query plan for a 5-level descent starting mid-tree at 'a'. We don't
     // mandate index usage at exactly one place in the plan -- SQLite's
@@ -157,10 +167,10 @@ describe("lineage backfill — idempotency", () => {
     insertRaw(db, "r", null);
     insertRaw(db, "c", "r");
 
-    migrateSessionsSchema(db);
+    runBackfill(db);
     const after1 = db.prepare("SELECT id, root_session_id FROM sessions ORDER BY id").all();
 
-    migrateSessionsSchema(db);
+    runBackfill(db);
     const after2 = db.prepare("SELECT id, root_session_id FROM sessions ORDER BY id").all();
 
     expect(after2).toEqual(after1);

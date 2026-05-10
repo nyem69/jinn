@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { initDb } from './registry.js';
+import { applyPendingMigrations } from './migrate-runner.js';
 
 // T1A.PR5: session checkpoints + replay context.
 //
@@ -10,29 +11,15 @@ import { initDb } from './registry.js';
 // the recorded tool_invoked/tool_completed events from session_events
 // back into a fresh child as observations.
 //
-// The schema mirrors PLAN-T1A § PR5 verbatim, but is created in-code
-// like every other T1A table — jimmy still has no SQL-file migration
-// runner. UNIQUE(session_id, branch, step_seq) makes writeCheckpoint
-// idempotent: a retry hits OR IGNORE and returns the existing row.
+// The schema is owned by `applyPendingMigrations` (0005_checkpoints.up.sql);
+// `initCheckpointsSchema` remains as a compat shim for tests/callers that
+// still invoke it directly.
 
-const DDL: string[] = [
-  `CREATE TABLE IF NOT EXISTS session_checkpoints (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id   TEXT NOT NULL,
-    step_seq     INTEGER NOT NULL,
-    branch       TEXT NOT NULL DEFAULT 'main',
-    state        TEXT NOT NULL,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(session_id, branch, step_seq)
-  )`,
-  `CREATE INDEX IF NOT EXISTS idx_session_checkpoints_session ON session_checkpoints(session_id, step_seq)`,
-  `CREATE INDEX IF NOT EXISTS idx_session_checkpoints_branch ON session_checkpoints(session_id, branch, step_seq)`,
-];
-
+/**
+ * @deprecated Compat shim. Schema is owned by `applyPendingMigrations`.
+ */
 export function initCheckpointsSchema(database: Database.Database): void {
-  for (const stmt of DDL) {
-    database.prepare(stmt).run();
-  }
+  applyPendingMigrations(database);
 }
 
 // 2 MB cap on state JSON. Plan says ~50 KB typical / ~500 KB worst-case
