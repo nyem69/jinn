@@ -137,4 +137,85 @@ describe('migrate-runner', () => {
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
     expect(tables.map(t => t.name)).toEqual(['schema_migrations']);
   });
+
+  it('bootstraps an existing in-code-DDL DB without re-running ALTERs', () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        engine TEXT NOT NULL,
+        engine_session_id TEXT,
+        source TEXT NOT NULL,
+        source_ref TEXT NOT NULL,
+        status TEXT DEFAULT 'idle',
+        created_at TEXT NOT NULL,
+        last_activity TEXT NOT NULL,
+        last_error TEXT,
+        employee TEXT,
+        model TEXT,
+        title TEXT,
+        parent_session_id TEXT,
+        root_session_id TEXT,
+        connector TEXT,
+        session_key TEXT,
+        reply_context TEXT,
+        message_id TEXT,
+        transport_meta TEXT,
+        total_cost REAL DEFAULT 0,
+        total_turns INTEGER DEFAULT 0,
+        effort_level TEXT,
+        compacted_at TEXT
+      );
+    `);
+    expect(() => applyPendingMigrations(db, MIGRATIONS_DIR)).not.toThrow();
+    const rows = db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: string }>;
+    expect(rows.map(r => r.version)).toContain('0003_lineage');
+    expect(rows.map(r => r.version)).toContain('0006_handlers_seed');
+  });
+
+  it('bootstraps a partially-tracked legacy DB (some schema_migrations rows already exist)', () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        engine TEXT NOT NULL,
+        engine_session_id TEXT,
+        source TEXT NOT NULL,
+        source_ref TEXT NOT NULL,
+        status TEXT DEFAULT 'idle',
+        created_at TEXT NOT NULL,
+        last_activity TEXT NOT NULL,
+        last_error TEXT,
+        employee TEXT,
+        model TEXT,
+        title TEXT,
+        parent_session_id TEXT,
+        root_session_id TEXT,
+        connector TEXT,
+        session_key TEXT,
+        reply_context TEXT,
+        message_id TEXT,
+        transport_meta TEXT,
+        total_cost REAL DEFAULT 0,
+        total_turns INTEGER DEFAULT 0,
+        effort_level TEXT,
+        compacted_at TEXT
+      );
+      CREATE TABLE schema_migrations (
+        version    TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+        checksum   TEXT NOT NULL
+      );
+      INSERT INTO schema_migrations (version, checksum) VALUES ('0001_initial', 'old-checksum-1');
+      INSERT INTO schema_migrations (version, checksum) VALUES ('0002_workspace', 'old-checksum-2');
+    `);
+    expect(() => applyPendingMigrations(db, MIGRATIONS_DIR)).not.toThrow();
+    const rows = db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: string }>;
+    expect(rows.map(r => r.version).sort()).toEqual([
+      '0001_initial',
+      '0002_workspace',
+      '0003_lineage',
+      '0004_events',
+      '0005_checkpoints',
+      '0006_handlers_seed',
+    ]);
+  });
 });
