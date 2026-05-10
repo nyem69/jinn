@@ -93,7 +93,10 @@ export function applyPendingMigrations(
 /**
  * Roll back to (and including) the migration AFTER targetVersion.
  * I.e. all migrations strictly newer than targetVersion are reverted.
- * Pass any unmatched string (e.g. '__ROLLBACK_ALL__') to roll back everything.
+ * Pass the sentinel '__ROLLBACK_ALL__' to roll back everything.
+ *
+ * Throws if targetVersion is neither the sentinel nor a currently-applied
+ * version — guards against typos that would otherwise revert the whole DB.
  */
 export function rollbackTo(
   db: Database.Database,
@@ -105,6 +108,17 @@ export function rollbackTo(
   const appliedRows = db
     .prepare('SELECT version FROM schema_migrations ORDER BY version DESC')
     .all() as Array<{ version: string }>;
+
+  if (targetVersion !== '__ROLLBACK_ALL__') {
+    const appliedSet = new Set(appliedRows.map(r => r.version));
+    if (!appliedSet.has(targetVersion)) {
+      throw new Error(
+        `rollbackTo: unknown target version '${targetVersion}'. ` +
+        `Applied: [${[...appliedSet].sort().join(', ')}]. ` +
+        `Pass '__ROLLBACK_ALL__' to revert everything.`
+      );
+    }
+  }
 
   const rolledBack: string[] = [];
   const deleteRow = db.prepare('DELETE FROM schema_migrations WHERE version = ?');

@@ -1,5 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -16,9 +18,16 @@ const MIGRATIONS_DIR = path.resolve(
 
 describe('migrate-runner', () => {
   let db: Database.Database;
+  const tmpDirsToCleanup: string[] = [];
 
   beforeEach(() => {
     db = new Database(':memory:');
+  });
+
+  afterEach(() => {
+    for (const dir of tmpDirsToCleanup.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('creates schema_migrations table on first call', () => {
@@ -94,9 +103,8 @@ describe('migrate-runner', () => {
   });
 
   it('rolls back the entire transaction if a migration fails midway', () => {
-    const fs = require('node:fs');
-    const os = require('node:os');
     const bogusDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mig-'));
+    tmpDirsToCleanup.push(bogusDir);
     fs.writeFileSync(path.join(bogusDir, '0001_ok.up.sql'),     'CREATE TABLE ok (id INTEGER);');
     fs.writeFileSync(path.join(bogusDir, '0001_ok.down.sql'),   'DROP TABLE ok;');
     fs.writeFileSync(path.join(bogusDir, '0002_bad.up.sql'),    'CREATE TABLE bad (id INTEGER); CREATE TABLE bad (id INTEGER);');
@@ -110,10 +118,17 @@ describe('migrate-runner', () => {
 
   it('every up-file has a sibling down-file', () => {
     const all = listMigrationFiles(MIGRATIONS_DIR);
-    const fs = require('node:fs');
     for (const m of all) {
       expect(fs.existsSync(m.downPath)).toBe(true);
     }
+  });
+
+  it('throws on unknown target version (typo guard)', () => {
+    applyPendingMigrations(db, MIGRATIONS_DIR);
+    expect(() => rollbackTo(db, '0004_event', MIGRATIONS_DIR)).toThrow(/unknown target version/);
+    expect(() => rollbackTo(db, 'nonexistent', MIGRATIONS_DIR)).toThrow(/unknown target version/);
+    // Sentinel still works
+    expect(() => rollbackTo(db, '__ROLLBACK_ALL__', MIGRATIONS_DIR)).not.toThrow();
   });
 
   it('full down sequence empties the schema (except tracking table)', () => {
