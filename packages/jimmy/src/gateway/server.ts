@@ -141,18 +141,24 @@ export async function startGateway(
   engines.set("codex", codexEngine);
   engines.set("gemini", geminiEngine);
 
-  // HTTP-loop engines: register ONLY when configured, so /api/engines and
-  // route-resolution errors reflect what's actually available. Construction
-  // is what validates required config (URL / API key); a missing or invalid
-  // config logs a warning and skips registration rather than crashing the
-  // gateway boot.
+  // HTTP-loop engines: register ONLY when configured, so /api/status and
+  // route-resolution errors reflect what's actually available.
+  //
+  // Construction-time failure policy: declaring engines.<name> in config is
+  // a commitment to run it. If the engine can't construct (missing url,
+  // missing apiKey env var, malformed shape), the gateway FAILS LOUDLY at
+  // boot rather than silently disabling — the operator either fixes the
+  // problem or removes the config block to opt out.
   if (config.engines.ollama) {
     try {
       const { OllamaEngine } = await import("../engines/ollama.js");
       engines.set("ollama", new OllamaEngine(config.engines.ollama));
       logger.info("engine registered: ollama");
     } catch (err) {
-      logger.warn(`engine 'ollama' not registered: ${(err as Error).message}`);
+      throw new Error(
+        `engines.ollama is declared but engine construction failed: ${(err as Error).message}\n` +
+          `→ Fix the config OR remove the engines.ollama block to opt out.`,
+      );
     }
   }
   if (config.engines.openai) {
@@ -161,7 +167,10 @@ export async function startGateway(
       engines.set("openai", new OpenAIEngine(config.engines.openai));
       logger.info("engine registered: openai");
     } catch (err) {
-      logger.warn(`engine 'openai' not registered: ${(err as Error).message}`);
+      throw new Error(
+        `engines.openai is declared but engine construction failed: ${(err as Error).message}\n` +
+          `→ Set the API key env var OR remove the engines.openai block to opt out.`,
+      );
     }
   }
 
@@ -594,6 +603,7 @@ export async function startGateway(
     getConfig: () => currentConfig,
     emit,
     connectors: connectorMap,
+    engines,
     reloadConnectorInstances,
   };
 

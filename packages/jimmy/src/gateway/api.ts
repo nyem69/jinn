@@ -81,6 +81,13 @@ export interface ApiContext {
   getConfig: () => JinnConfig;
   emit: (event: string, payload: unknown) => void;
   connectors: Map<string, import("../shared/types.js").Connector>;
+  /**
+   * Registered engines, keyed by name. Used by /api/status to report
+   * what's actually live — config.engines.* may be present but
+   * registration may have been declined (e.g. opt-in HTTP engines whose
+   * config is malformed and construction throws).
+   */
+  engines: Map<string, Engine>;
   reloadConnectorInstances?: () => Promise<{ started: string[]; stopped: string[]; errors: string[] }>;
 }
 
@@ -419,16 +426,21 @@ export async function handleApiRequest(
         if (v === "sideband" || v === "stdout") return v;
         return "off";
       })();
+      // Iterate the live engines Map so /api/status reflects what's
+      // actually registered, not just what's declared in config. An
+      // opt-in HTTP engine whose construction was declined (missing
+      // apiKey, malformed config) won't appear here — operators
+      // use the gap to detect mis-registered engines.
+      const enginesOut: Record<string, unknown> = { default: config.engines.default };
+      for (const name of context.engines.keys()) {
+        const cfgBlock = (config.engines as unknown as Record<string, { model?: string } | undefined>)[name];
+        enginesOut[name] = { model: cfgBlock?.model, available: true };
+      }
       return json(res, {
         status: "ok",
         uptime: Math.floor((Date.now() - context.startTime) / 1000),
         port: config.gateway.port || 7777,
-        engines: {
-          default: config.engines.default,
-          claude: { model: config.engines.claude.model, available: true },
-          codex: { model: config.engines.codex.model, available: true },
-          ...(config.engines.gemini ? { gemini: { model: config.engines.gemini.model, available: true } } : {}),
-        },
+        engines: enginesOut,
         sessions: { total: sessions.length, running, active: running },
         connectors,
         features: {
