@@ -372,3 +372,101 @@ describe("agentLoop: token + model accounting", () => {
     expect(result.billedModels).toEqual(["gpt-4o-mini"]);
   });
 });
+
+// ─── durationMs on every result kind ─────────────────────────────────
+
+describe("agentLoop: durationMs is set on every result kind", () => {
+  it("ok result", async () => {
+    const r = await runAgentLoop(baseOpts({ provider: mockProvider([assistantText("hi")]) }));
+    expect(typeof r.durationMs).toBe("number");
+    expect(r.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("provider_error result", async () => {
+    const r = await runAgentLoop(baseOpts({ provider: mockProvider([new Error("nope")]) }));
+    expect(typeof r.durationMs).toBe("number");
+  });
+
+  it("max_turns result", async () => {
+    const scripts = Array.from({ length: 8 }, () =>
+      assistantToolCall([tc("read", { path: "x" }, "c")]),
+    );
+    const toolExecutors = new Map<string, ToolExecutor>();
+    toolExecutors.set("read", fakeExec("ok"));
+    const r = await runAgentLoop(
+      baseOpts({ provider: mockProvider(scripts), toolExecutors, maxTurns: 2 }),
+    );
+    expect(r.kind).toBe("max_turns");
+    expect(typeof r.durationMs).toBe("number");
+  });
+
+  it("timeout result", async () => {
+    const provider = mockProvider([
+      assistantToolCall([tc("read", { path: "x" }, "c1")]),
+      assistantText("never"),
+    ]);
+    const slow: ToolExecutor = async () => {
+      await new Promise((r) => setTimeout(r, 200));
+      return { ok: true, content: "x", audit: { truncated: false } };
+    };
+    const toolExecutors = new Map<string, ToolExecutor>();
+    toolExecutors.set("read", slow);
+    const r = await runAgentLoop(
+      baseOpts({ provider, toolExecutors, timeoutMs: 100 }),
+    );
+    expect(r.kind).toBe("timeout");
+    expect(r.durationMs).toBeGreaterThanOrEqual(100);
+  });
+});
+
+// ─── Audit-failure visibility ────────────────────────────────────────
+
+describe("agentLoop: audit failures surface in logger.warn", () => {
+  it("audit.record() throwing produces a logger.warn line", async () => {
+    const { logger } = await import("../../shared/logger.js");
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      const audit: AuditLogger = {
+        record: () => {
+          throw new Error("sqlite locked");
+        },
+      };
+      const provider = mockProvider([
+        assistantToolCall([tc("read", { path: "x" }, "c1")]),
+        assistantText("done"),
+      ]);
+      const toolExecutors = new Map<string, ToolExecutor>();
+      toolExecutors.set("read", fakeExec("ok"));
+      const result = await runAgentLoop(baseOpts({ provider, toolExecutors, audit }));
+      expect(result.kind).toBe("ok");
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const msg = String(warnSpy.mock.calls[0]?.[0] ?? "");
+      expect(msg).toMatch(/audit sink failed/);
+      expect(msg).toMatch(/sqlite locked/);
+      expect(msg).toMatch(/"read"/);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+// ─── Unknown-tool loop converges to max_turns ────────────────────────
+
+describe("agentLoop: repeated unknown tool eventually hits max_turns", () => {
+  it("converges cleanly when the model keeps calling unknown tools", async () => {
+    const scripts = Array.from({ length: 5 }, () =>
+      assistantToolCall([tc("nonexistent", { x: 1 }, "c-x")]),
+    );
+    const provider = mockProvider(scripts);
+    const toolExecutors = new Map<string, ToolExecutor>(); // empty registry
+    const result = await runAgentLoop(
+      baseOpts({ provider, toolExecutors, maxTurns: 4 }),
+    );
+    expect(result.kind).toBe("max_turns");
+    if (result.kind !== "max_turns") return;
+    expect(result.turns).toBe(4);
+    // Token accumulation continues across unknown-tool turns.
+    expect(result.promptTokens).toBe(40); // 4 turns × 10
+    expect(result.completionTokens).toBe(20); // 4 turns × 5
+  });
+});

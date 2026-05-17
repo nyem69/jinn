@@ -33,15 +33,70 @@ const SECRET_KEY_PATTERNS = [
 const MAX_AUDIT_STRING_CHARS = 200;
 const MAX_AUDIT_DEPTH = 5;
 
+/**
+ * Query-string parameter names that look like credentials. Matched
+ * case-insensitively against URL.searchParams keys; the VALUE is
+ * replaced with "[redacted]". (We don't strip the key itself — the
+ * presence of `?api_key=...` is itself useful debugging signal.)
+ */
+const SECRET_QUERY_PATTERNS = [
+  /api[_-]?key/i,
+  /access[_-]?token/i,
+  /^token$/i,
+  /^auth$/i,
+  /authorization/i,
+  /secret/i,
+  /password/i,
+  /^key$/i,
+  /sig(nature)?/i,
+];
+
 function isSecretKey(key: string): boolean {
   return SECRET_KEY_PATTERNS.some((re) => re.test(key));
+}
+
+function isSecretQueryParam(name: string): boolean {
+  return SECRET_QUERY_PATTERNS.some((re) => re.test(name));
+}
+
+/**
+ * Strip credentials from a URL string. Removes userinfo (https://user:pass@host)
+ * entirely and redacts query-string values for keys matching SECRET_QUERY_PATTERNS.
+ * Returns the original string unchanged if not a parseable URL.
+ */
+function redactUrl(s: string): string {
+  // Cheap guard: only attempt parsing for http(s)://-shaped strings.
+  if (!/^https?:\/\//i.test(s)) return s;
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return s;
+  }
+  let touched = false;
+  if (u.username || u.password) {
+    u.username = "";
+    u.password = "";
+    touched = true;
+  }
+  for (const [k] of u.searchParams.entries()) {
+    if (isSecretQueryParam(k)) {
+      u.searchParams.set(k, "[redacted]");
+      touched = true;
+    }
+  }
+  return touched ? u.toString() : s;
 }
 
 function redact(value: JsonValue, depth: number): JsonValue {
   if (depth > MAX_AUDIT_DEPTH) return "[depth-capped]";
   if (typeof value === "string") {
-    if (value.length <= MAX_AUDIT_STRING_CHARS) return value;
-    return value.slice(0, MAX_AUDIT_STRING_CHARS) + `…[${value.length - MAX_AUDIT_STRING_CHARS} more]`;
+    // Strip credentials from URL-shaped strings BEFORE truncation, so a
+    // long token sitting at the tail can't survive by being chopped off
+    // partway through.
+    const cleaned = redactUrl(value);
+    if (cleaned.length <= MAX_AUDIT_STRING_CHARS) return cleaned;
+    return cleaned.slice(0, MAX_AUDIT_STRING_CHARS) + `…[${cleaned.length - MAX_AUDIT_STRING_CHARS} more]`;
   }
   if (Array.isArray(value)) {
     return value.map((v) => redact(v, depth + 1));

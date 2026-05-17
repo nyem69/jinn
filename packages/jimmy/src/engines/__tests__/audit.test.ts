@@ -71,6 +71,68 @@ describe("audit: sanitizeArgsForAudit redaction", () => {
   });
 });
 
+describe("audit: URL credential redaction", () => {
+  it("redacts ?api_key= query parameter", () => {
+    const s = sanitizeArgsForAudit({ url: "https://example.com/path?api_key=secret123&q=hi" });
+    expect(s).not.toContain("secret123");
+    // URLSearchParams URL-encodes the value, so we accept either form.
+    expect(s).toMatch(/api_key=(\[redacted\]|%5Bredacted%5D)/);
+    expect(s).toContain("q=hi"); // non-secret query params preserved
+  });
+
+  it("redacts ?token= and ?access_token=", () => {
+    const s = sanitizeArgsForAudit({ url: "https://x.com/?token=abc&access_token=xyz" });
+    expect(s).not.toContain("abc");
+    expect(s).not.toContain("xyz");
+  });
+
+  it("strips https://user:password@host userinfo", () => {
+    const s = sanitizeArgsForAudit({ url: "https://user:hunter2@example.com/path" });
+    expect(s).not.toContain("hunter2");
+    expect(s).not.toContain("user:");
+  });
+
+  it("leaves URLs without credentials untouched", () => {
+    const s = sanitizeArgsForAudit({ url: "https://example.com/path?q=hi" });
+    const p = JSON.parse(s);
+    expect(p.url).toBe("https://example.com/path?q=hi");
+  });
+
+  it("redacts URL secrets in arrays (e.g. webfetch redirect_chain)", () => {
+    const s = sanitizeArgsForAudit({
+      chain: ["https://a.com/?api_key=A", "https://b.com/"] as never,
+    });
+    expect(s).not.toContain("api_key=A");
+    expect(s).toContain("https://b.com/");
+  });
+
+  it("redacts URL secret BEFORE truncation so a long token can't survive at the tail", () => {
+    const longSecret = "k".repeat(500);
+    const s = sanitizeArgsForAudit({ url: `https://e.com/?api_key=${longSecret}` });
+    expect(s).not.toContain(longSecret);
+    expect(s).not.toContain("kkkk"); // even a fragment of the token
+  });
+
+  it("variants: ?password=, ?secret=, ?signature=, ?sig=", () => {
+    const cases = [
+      "https://x.com/?password=p",
+      "https://x.com/?secret=s",
+      "https://x.com/?signature=sig",
+      "https://x.com/?sig=short",
+    ];
+    for (const url of cases) {
+      const s = sanitizeArgsForAudit({ url });
+      expect(s).not.toMatch(/=p[^a-zA-Z]|=s[^a-zA-Z]|=sig[^a-zA-Z]|=short/);
+    }
+  });
+
+  it("doesn't crash on malformed URL strings (returns them untouched)", () => {
+    const s = sanitizeArgsForAudit({ url: "not a url at all" });
+    const p = JSON.parse(s);
+    expect(p.url).toBe("not a url at all");
+  });
+});
+
 describe("audit: buildAuditRow keeps NO content / stdout / stderr / body", () => {
   it("produces only the documented metadata keys", () => {
     const result: ToolResult = {

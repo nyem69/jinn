@@ -33,6 +33,7 @@ import type { ProviderCall, ProviderCallResult, ProviderMessage, ProviderToolDef
 import type { ToolExecutionContext, ToolResult } from "./tools/types.js";
 import type { ToolExecutor } from "./tools/index.js";
 import { buildAuditRow, type AuditLogger, type AuditRow } from "./audit.js";
+import { logger } from "../shared/logger.js";
 
 export interface AgentLoopOpts {
   /** Provider adapter (openai or ollama). */
@@ -68,6 +69,8 @@ interface AgentLoopUsage {
 
 interface AgentLoopBase extends AgentLoopUsage {
   turns: number;
+  /** Wall-clock duration of the whole loop, in milliseconds. */
+  durationMs: number;
 }
 
 export interface AgentLoopOk extends AgentLoopBase {
@@ -89,7 +92,8 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
   if (opts.systemPrompt) messages.push({ role: "system", content: opts.systemPrompt });
   messages.push({ role: "user", content: opts.userPrompt });
 
-  const deadline = Date.now() + opts.timeoutMs;
+  const loopStart = Date.now();
+  const deadline = loopStart + opts.timeoutMs;
   let promptTokens = 0;
   let completionTokens = 0;
   const billedModels: string[] = [];
@@ -102,6 +106,7 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
         kind: "timeout",
         message: `loop deadline exceeded before provider call at turn ${turn}`,
         turns: turn,
+        durationMs: Date.now() - loopStart,
         promptTokens,
         completionTokens,
         billedModels,
@@ -124,6 +129,7 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
         kind: "provider_error",
         message: (err as Error).message,
         turns: turn,
+        durationMs: Date.now() - loopStart,
         promptTokens,
         completionTokens,
         billedModels,
@@ -146,6 +152,7 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
         kind: "ok",
         finalContent: providerResult.message.content,
         turns: turn + 1,
+        durationMs: Date.now() - loopStart,
         promptTokens,
         completionTokens,
         billedModels,
@@ -161,6 +168,7 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
           kind: "timeout",
           message: `loop deadline exceeded before tool call "${tc.name}" at turn ${turn}`,
           turns: turn + 1,
+          durationMs: Date.now() - loopStart,
           promptTokens,
           completionTokens,
           billedModels,
@@ -201,11 +209,11 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
         }
       }
 
-      const durationMs = Date.now() - callStart;
+      const toolDurationMs = Date.now() - callStart;
 
       if (opts.audit) {
-        const row = buildAuditRow(tc.name, tc.arguments, result, durationMs);
-        await safeAudit(opts.audit, row);
+        const row = buildAuditRow(tc.name, tc.arguments, result, toolDurationMs);
+        await safeAudit(opts.audit, row, tc.name);
       }
 
       const toolMessage: ProviderMessage = {
@@ -224,17 +232,21 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
     kind: "max_turns",
     message: `loop reached maxTurns=${opts.maxTurns} without a final assistant message`,
     turns: opts.maxTurns,
+    durationMs: Date.now() - loopStart,
     promptTokens,
     completionTokens,
     billedModels,
   };
 }
 
-async function safeAudit(audit: AuditLogger, row: AuditRow): Promise<void> {
+async function safeAudit(audit: AuditLogger, row: AuditRow, toolName: string): Promise<void> {
   try {
     await audit.record(row);
-  } catch {
-    // Audit failures must NOT break the loop. The engine wrapper's
-    // logger will surface persistent audit-sink issues at a higher level.
+  } catch (err) {
+    // Audit failures must NOT break the loop, but they MUST be visible —
+    // log via the gateway logger so persistent sink issues are surfaced
+    // (e.g. sqlite-locked, disk full, schema drift).
+    const msg = (err as Error)?.message ?? String(err);
+    logger.warn(`agentLoop: audit sink failed for tool "${toolName}": ${msg}`);
   }
 }
