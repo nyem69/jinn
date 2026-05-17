@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { JinnConfig, Connector, Employee } from "../shared/types.js";
+import type { JinnConfig, Connector, Employee, Engine } from "../shared/types.js";
 import { loadConfig } from "../shared/config.js";
 import { configureLogger, logger } from "../shared/logger.js";
 import { initDb, recoverStaleSessions, recoverStaleQueueItems, getInterruptedSessions, listSessions, updateSession } from "../sessions/registry.js";
@@ -133,10 +133,37 @@ export async function startGateway(
   const claudeEngine = new ClaudeEngine();
   const codexEngine = new CodexEngine();
   const geminiEngine = new GeminiEngine();
-  const engines = new Map<string, InstanceType<typeof ClaudeEngine> | InstanceType<typeof CodexEngine> | InstanceType<typeof GeminiEngine>>();
+  // Widen to Engine so HTTP-loop engines (ollama/openai) can co-exist with
+  // the CLI-spawning engines. Process-killing paths still use the original
+  // typed references (claudeEngine, codexEngine) below.
+  const engines = new Map<string, Engine>();
   engines.set("claude", claudeEngine);
   engines.set("codex", codexEngine);
   engines.set("gemini", geminiEngine);
+
+  // HTTP-loop engines: register ONLY when configured, so /api/engines and
+  // route-resolution errors reflect what's actually available. Construction
+  // is what validates required config (URL / API key); a missing or invalid
+  // config logs a warning and skips registration rather than crashing the
+  // gateway boot.
+  if (config.engines.ollama) {
+    try {
+      const { OllamaEngine } = await import("../engines/ollama.js");
+      engines.set("ollama", new OllamaEngine(config.engines.ollama));
+      logger.info("engine registered: ollama");
+    } catch (err) {
+      logger.warn(`engine 'ollama' not registered: ${(err as Error).message}`);
+    }
+  }
+  if (config.engines.openai) {
+    try {
+      const { OpenAIEngine } = await import("../engines/openai.js");
+      engines.set("openai", new OpenAIEngine(config.engines.openai));
+      logger.info("engine registered: openai");
+    } catch (err) {
+      logger.warn(`engine 'openai' not registered: ${(err as Error).message}`);
+    }
+  }
 
   // Derive connector names from config
   const connectorNames: string[] = [];
