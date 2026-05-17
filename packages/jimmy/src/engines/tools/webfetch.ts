@@ -142,8 +142,11 @@ async function preResolve(
  * the socket connects. This is the DNS-rebinding mitigation — even if the
  * pre-resolve check passed against a clean address set, the actual address
  * handed to the socket is verified here.
+ *
+ * Exported so unit tests can exercise the validator path directly without
+ * setting up real sockets.
  */
-function buildLookup(allowPrivate: boolean): LookupFunction {
+export function buildLookup(allowPrivate: boolean): LookupFunction {
   // Cast through `as` because node:net's LookupFunction signature uses an
   // overloaded shape that's awkward to type from TS strictly.
   return ((hostname: string, optsOrCallback: unknown, maybeCallback?: unknown): void => {
@@ -238,7 +241,12 @@ async function fetchOnce(
         const headers = res.headers;
 
         // Redirect: capture Location, drain (briefly) and resolve.
-        if (status >= 300 && status < 400 && headers.location) {
+        // HTTP spec says Location is single-valued, but node's
+        // IncomingHttpHeaders types it as `string | string[]`. Defensively
+        // unwrap so an unusual server can't poison the URL with comma-joins.
+        const locRaw = headers.location;
+        const locStr = Array.isArray(locRaw) ? locRaw[0] : locRaw;
+        if (status >= 300 && status < 400 && locStr) {
           // Don't accumulate body bytes for redirect responses.
           res.resume();
           res.on("end", () => {
@@ -250,7 +258,7 @@ async function fetchOnce(
                 body: "",
                 bodyTruncated: false,
                 originalBytes: 0,
-                redirectTo: String(headers.location),
+                redirectTo: locStr,
               },
             });
           });
@@ -263,7 +271,7 @@ async function fetchOnce(
                 body: "",
                 bodyTruncated: false,
                 originalBytes: 0,
-                redirectTo: String(headers.location),
+                redirectTo: locStr,
               },
             });
           });
