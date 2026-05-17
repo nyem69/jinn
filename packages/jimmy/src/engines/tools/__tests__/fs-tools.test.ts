@@ -66,11 +66,11 @@ describe("tools/read", () => {
     expect(r.content).toMatch(/\[truncated: 500 of 2000/);
   });
 
-  it("returns ok:false with jail_violation on '..' escape", async () => {
+  it("returns ok:false with lexical_escape on '..' escape", async () => {
     const r = await readTool({ path: "../escape.txt" }, ctx);
     expect(r.ok).toBe(false);
-    expect(r.audit.error).toBe("jail_violation");
-    expect(r.content).toMatch(/resolves outside of cwd jail/);
+    expect(r.audit.error).toBe("lexical_escape");
+    expect(r.content).toMatch(/violates jail/);
   });
 
   it("returns ok:false with ENOENT when file missing", async () => {
@@ -119,7 +119,7 @@ describe("tools/write", () => {
   it("rejects jail escape", async () => {
     const r = await writeTool({ path: "../outside.txt", content: "x" }, ctx);
     expect(r.ok).toBe(false);
-    expect(r.audit.error).toBe("jail_violation");
+    expect(r.audit.error).toBe("lexical_escape");
   });
 
   it("rejects missing content arg", async () => {
@@ -197,7 +197,7 @@ describe("tools/edit", () => {
   it("rejects jail escape", async () => {
     const r = await editTool({ path: "../e.txt", old_string: "a", new_string: "b" }, ctx);
     expect(r.ok).toBe(false);
-    expect(r.audit.error).toBe("jail_violation");
+    expect(r.audit.error).toBe("lexical_escape");
   });
 
   it("returns ENOENT when file missing", async () => {

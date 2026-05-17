@@ -23,6 +23,7 @@ import type { ToolExecutionContext, ToolResult } from "./types.js";
 
 const DEFAULT_LINE_LIMIT = 2000;
 const DEFAULT_MAX_CHARS = 64_000;
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 interface ReadArgs {
   path: string;
@@ -60,13 +61,32 @@ export async function readTool(raw: JsonObject, ctx: ToolExecutionContext): Prom
 
   let abs: string;
   try {
-    abs = resolveInJail(ctx.cwd, requestedPath);
+    abs = await resolveInJail(ctx.cwd, requestedPath);
   } catch (err) {
     const message = (err as Error).message;
     return {
       ok: false,
       content: `read: ${message}`,
-      audit: { truncated: false, error: err instanceof JailViolation ? "jail_violation" : "bad_path" },
+      audit: { truncated: false, error: err instanceof JailViolation ? err.reason : "bad_path" },
+    };
+  }
+
+  // Size cap: stat before readFile so huge files don't blow up memory.
+  try {
+    const st = await fs.stat(abs);
+    if (st.size > MAX_FILE_BYTES) {
+      return {
+        ok: false,
+        content: `read: "${requestedPath}" is ${st.size} bytes; max is ${MAX_FILE_BYTES} (${Math.floor(MAX_FILE_BYTES / 1024 / 1024)}MB)`,
+        audit: { truncated: false, error: "too_large", file_bytes: st.size },
+      };
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+    return {
+      ok: false,
+      content: `read: cannot stat "${requestedPath}" (${code})`,
+      audit: { truncated: false, error: code },
     };
   }
 

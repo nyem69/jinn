@@ -24,6 +24,8 @@ import type { JsonObject } from "../../shared/types.js";
 import { JailViolation, resolveInJail } from "./cwdJail.js";
 import type { ToolExecutionContext, ToolResult } from "./types.js";
 
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
+
 interface EditArgs {
   path: string;
   old_string: string;
@@ -71,12 +73,31 @@ export async function editTool(raw: JsonObject, ctx: ToolExecutionContext): Prom
 
   let abs: string;
   try {
-    abs = resolveInJail(ctx.cwd, requestedPath);
+    abs = await resolveInJail(ctx.cwd, requestedPath, { rejectSymlinkLeaf: true });
   } catch (err) {
     return {
       ok: false,
       content: `edit: ${(err as Error).message}`,
-      audit: { truncated: false, error: err instanceof JailViolation ? "jail_violation" : "bad_path" },
+      audit: { truncated: false, error: err instanceof JailViolation ? err.reason : "bad_path" },
+    };
+  }
+
+  // Size cap before readFile.
+  try {
+    const st = await fs.stat(abs);
+    if (st.size > MAX_FILE_BYTES) {
+      return {
+        ok: false,
+        content: `edit: "${requestedPath}" is ${st.size} bytes; max is ${MAX_FILE_BYTES} (${Math.floor(MAX_FILE_BYTES / 1024 / 1024)}MB)`,
+        audit: { truncated: false, error: "too_large", file_bytes: st.size },
+      };
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+    return {
+      ok: false,
+      content: `edit: cannot stat "${requestedPath}" (${code})`,
+      audit: { truncated: false, error: code },
     };
   }
 

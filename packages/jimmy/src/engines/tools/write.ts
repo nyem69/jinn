@@ -42,12 +42,22 @@ export async function writeTool(raw: JsonObject, ctx: ToolExecutionContext): Pro
 
   let abs: string;
   try {
-    abs = resolveInJail(ctx.cwd, parsed.args.path);
+    abs = await resolveInJail(ctx.cwd, parsed.args.path, { rejectSymlinkLeaf: true });
   } catch (err) {
     return {
       ok: false,
       content: `write: ${(err as Error).message}`,
-      audit: { truncated: false, error: err instanceof JailViolation ? "jail_violation" : "bad_path" },
+      audit: { truncated: false, error: err instanceof JailViolation ? err.reason : "bad_path" },
+    };
+  }
+
+  // Refuse to write to the cwd itself (would EISDIR after mkdir-on-parent-of-cwd).
+  const realCwd = await fs.realpath(ctx.cwd);
+  if (abs === realCwd) {
+    return {
+      ok: false,
+      content: `write: refusing to write to cwd directory itself`,
+      audit: { truncated: false, error: "is_cwd_dir" },
     };
   }
 
