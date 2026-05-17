@@ -1,4 +1,5 @@
-import type { CronJob, Connector, JinnConfig } from "../shared/types.js";
+import type { BuiltInEngineName, CronJob, Connector, JinnConfig } from "../shared/types.js";
+import { modelFor } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { appendRunLog } from "./jobs.js";
 import { scanOrg, findEmployee } from "../gateway/org.js";
@@ -64,7 +65,7 @@ export async function runCronJob(
       {
         employee,
         engine: job.engine || employee?.engine || config.engines.default,
-        model: job.model || employee?.model || config.engines[(job.engine || config.engines.default) as "claude" | "codex" | "gemini"]?.model,
+        model: job.model || employee?.model || modelFor(config.engines, (job.engine || config.engines.default) as BuiltInEngineName),
         title: job.name,
       },
     );
