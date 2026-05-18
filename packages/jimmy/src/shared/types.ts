@@ -382,15 +382,88 @@ export interface PortalConfig {
   onboarded?: boolean;
 }
 
+/**
+ * BuiltInEngineName lists the engines a user can configure via `config.yaml`
+ * or select via `cron job.engine`. `mock` is registered in the engines Map
+ * for tests but is not user-configurable — see EngineName below.
+ */
+export type BuiltInEngineName = "claude" | "codex" | "gemini" | "ollama" | "openai";
+
+/**
+ * EngineName widens BuiltInEngineName with `mock` for the test surface.
+ * Anywhere user input may flow (cron jobs, config defaults, session
+ * `engine` field), use BuiltInEngineName. Anywhere the engines registry
+ * Map is keyed, use EngineName.
+ */
+export type EngineName = BuiltInEngineName | "mock";
+
+export interface EngineConfigBase {
+  /** Default model the engine uses when a job doesn't specify one. */
+  model?: string;
+  /** Engine binary (only meaningful for CLI-spawning engines: claude/codex/gemini). */
+  bin?: string;
+  /** Reasoning-effort hint passed through to the CLI engine where supported. */
+  effortLevel?: string;
+  /** Effort override applied only when this engine runs as a child session. */
+  childEffortOverride?: string;
+  /** Max turns the agent loop will run before returning. Default per engine. */
+  maxTurns?: number;
+  /** Wall-clock timeout for the whole engine run, in ms. Default per engine. */
+  timeoutMs?: number;
+}
+
+/** Per-tool enable + per-tool config knobs for HTTP-loop engines (ollama, openai). */
+export interface EngineToolsConfig {
+  /** Subset of {"read","write","edit","bash","webfetch"} the engine may use. Empty = no tools. */
+  enabled?: string[];
+  /** Bash tool allowlist (argv[0] tokens). Empty array = bash disabled regardless of `enabled`. */
+  bashAllowlist?: string[];
+  /** Per-tool overrides for truncation caps + webfetch network policy. */
+  bash?: { maxStdout?: number; maxStderr?: number; perCallTimeoutMs?: number };
+  read?: { maxChars?: number };
+  webfetch?: { maxChars?: number; perCallTimeoutMs?: number; allowPrivate?: boolean };
+}
+
+export interface OllamaConfig extends EngineConfigBase {
+  /** Base URL for the Ollama HTTP API (e.g. https://ollama.aga.my). */
+  url: string;
+  /** Optional bearer token; read from process.env.OLLAMA_TOKEN if unset here. */
+  authTokenEnvVar?: string;
+  tools?: EngineToolsConfig;
+  /** HTTP per-call timeout (ms). Default 60000. */
+  providerTimeoutMs?: number;
+}
+
+export interface OpenAIConfig extends EngineConfigBase {
+  /** Defaults to https://api.openai.com/v1. */
+  baseUrl?: string;
+  /** Env var holding the API key. Default OPENAI_API_KEY. */
+  apiKeyEnvVar?: string;
+  tools?: EngineToolsConfig;
+  /** HTTP per-call timeout (ms). Default 60000. */
+  providerTimeoutMs?: number;
+}
+
+export interface EnginesConfig {
+  /** Default engine for sessions that don't specify one. Cannot default to `mock`. */
+  default: BuiltInEngineName;
+  claude: EngineConfigBase & { bin: string; model: string };
+  codex: EngineConfigBase & { bin: string; model: string };
+  gemini?: EngineConfigBase & { bin: string; model: string };
+  ollama?: OllamaConfig;
+  openai?: OpenAIConfig;
+}
+
+/** Resolve the configured model for an engine, returning undefined if the engine isn't configured. */
+export function modelFor(config: EnginesConfig, engine: BuiltInEngineName): string | undefined {
+  const e = config[engine];
+  return e?.model;
+}
+
 export interface JinnConfig {
   jinn?: { version?: string };
   gateway: { port: number; host: string; streaming?: boolean };
-  engines: {
-    default: "claude" | "codex" | "gemini";
-    claude: { bin: string; model: string; effortLevel?: string; childEffortOverride?: string };
-    codex: { bin: string; model: string; effortLevel?: string; childEffortOverride?: string };
-    gemini?: { bin: string; model: string; effortLevel?: string; childEffortOverride?: string };
-  };
+  engines: EnginesConfig;
   connectors: Record<string, any> & {
     web?: WebConnectorConfig;
     slack?: SlackConnectorConfig;

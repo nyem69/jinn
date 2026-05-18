@@ -18,6 +18,7 @@ import {
   getInstanceVersion,
   getPendingMigrations,
 } from "../shared/version.js";
+import type { BuiltInEngineName } from "../shared/types.js";
 
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
@@ -171,6 +172,16 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
   const defaultEngine = config.engines.default ?? "claude";
   const engineConfig = config.engines[defaultEngine] ?? config.engines.claude;
 
+  // migrate operates by spawning the CLI engine and chatting with it.
+  // HTTP-loop engines (ollama, openai) added in V1 have no `bin` — they
+  // aren't installed as a local binary. If the operator's default engine
+  // is HTTP, fall back to claude for the migration step.
+  // (TS narrowing across config.engines[union] doesn't preserve the
+  // required `bin: string` on the claude/codex/gemini intersection, so
+  // we coalesce explicitly.)
+  const cliEngineBin: string = engineConfig.bin ?? config.engines.claude.bin;
+  const cliEngineName: BuiltInEngineName = engineConfig.bin ? defaultEngine : "claude";
+
   try {
     const prompt = [
       `Apply all pending migrations in ${MIGRATIONS_DIR}.`,
@@ -184,10 +195,10 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
       `Clean up the migrations/ directory when done.`,
     ].join("\n");
 
-    const args = buildMigrateArgs(defaultEngine, prompt);
-    console.log(`${DIM}Engine: ${defaultEngine} (${engineConfig.bin})${RESET}\n`);
+    const args = buildMigrateArgs(cliEngineName, prompt);
+    console.log(`${DIM}Engine: ${cliEngineName} (${cliEngineBin})${RESET}\n`);
 
-    execFileSync(engineConfig.bin, args, {
+    execFileSync(cliEngineBin, args, {
       stdio: "inherit",
       cwd: JINN_HOME,
     });

@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { JinnConfig, Connector, Employee } from "../shared/types.js";
+import type { JinnConfig, Connector, Employee, Engine } from "../shared/types.js";
 import { loadConfig } from "../shared/config.js";
 import { configureLogger, logger } from "../shared/logger.js";
 import { initDb, recoverStaleSessions, recoverStaleQueueItems, getInterruptedSessions, listSessions, updateSession } from "../sessions/registry.js";
@@ -133,10 +133,46 @@ export async function startGateway(
   const claudeEngine = new ClaudeEngine();
   const codexEngine = new CodexEngine();
   const geminiEngine = new GeminiEngine();
-  const engines = new Map<string, InstanceType<typeof ClaudeEngine> | InstanceType<typeof CodexEngine> | InstanceType<typeof GeminiEngine>>();
+  // Widen to Engine so HTTP-loop engines (ollama/openai) can co-exist with
+  // the CLI-spawning engines. Process-killing paths still use the original
+  // typed references (claudeEngine, codexEngine) below.
+  const engines = new Map<string, Engine>();
   engines.set("claude", claudeEngine);
   engines.set("codex", codexEngine);
   engines.set("gemini", geminiEngine);
+
+  // HTTP-loop engines: register ONLY when configured, so /api/status and
+  // route-resolution errors reflect what's actually available.
+  //
+  // Construction-time failure policy: declaring engines.<name> in config is
+  // a commitment to run it. If the engine can't construct (missing url,
+  // missing apiKey env var, malformed shape), the gateway FAILS LOUDLY at
+  // boot rather than silently disabling — the operator either fixes the
+  // problem or removes the config block to opt out.
+  if (config.engines.ollama) {
+    try {
+      const { OllamaEngine } = await import("../engines/ollama.js");
+      engines.set("ollama", new OllamaEngine(config.engines.ollama));
+      logger.info("engine registered: ollama");
+    } catch (err) {
+      throw new Error(
+        `engines.ollama is declared but engine construction failed: ${(err as Error).message}\n` +
+          `→ Fix the config OR remove the engines.ollama block to opt out.`,
+      );
+    }
+  }
+  if (config.engines.openai) {
+    try {
+      const { OpenAIEngine } = await import("../engines/openai.js");
+      engines.set("openai", new OpenAIEngine(config.engines.openai));
+      logger.info("engine registered: openai");
+    } catch (err) {
+      throw new Error(
+        `engines.openai is declared but engine construction failed: ${(err as Error).message}\n` +
+          `→ Set the API key env var OR remove the engines.openai block to opt out.`,
+      );
+    }
+  }
 
   // Derive connector names from config
   const connectorNames: string[] = [];
@@ -567,6 +603,7 @@ export async function startGateway(
     getConfig: () => currentConfig,
     emit,
     connectors: connectorMap,
+    engines,
     reloadConnectorInstances,
   };
 

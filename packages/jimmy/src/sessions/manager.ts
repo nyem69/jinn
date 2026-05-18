@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import type {
+  BuiltInEngineName,
   Connector,
   Employee,
   Engine,
@@ -8,6 +9,7 @@ import type {
   Session,
   Target,
 } from "../shared/types.js";
+import { modelFor } from "../shared/types.js";
 import { startSessionTimeout } from "../shared/timeout.js";
 import {
   accumulateSessionCost,
@@ -934,7 +936,7 @@ export class SessionManager {
         `Session: ${session.id}`,
         `Engine: ${session.engine}`,
         `Connector: ${session.connector || session.source}`,
-        `Model: ${session.model || this.config.engines[session.engine as "claude" | "codex" | "gemini"]?.model || "default"}`,
+        `Model: ${session.model || modelFor(this.config.engines, session.engine as BuiltInEngineName) || "default"}`,
         `State: ${transportState}`,
         `Queue depth: ${queueDepth}`,
         `Created: ${session.createdAt}`,
