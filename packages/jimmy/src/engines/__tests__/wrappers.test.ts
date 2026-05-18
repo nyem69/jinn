@@ -96,6 +96,44 @@ describe("OllamaEngine: construction-time validation", () => {
       delete process.env.CUSTOM_OLLAMA_TOKEN;
     }
   });
+
+  it("rejects authTokenEnvVar that looks like a token VALUE, not a NAME", () => {
+    // Common operator mistake: pasting the secret into the *EnvVar field.
+    // The guard catches this before we silently lookup process.env[secret]
+    // (which would always return undefined → engine constructs unauthed).
+    expect(() => new OllamaEngine({
+      url: "https://o.example.com",
+      authTokenEnvVar: "sk-abc-XYZ-123", // hyphens + lowercase → not a valid env var name
+    })).toThrow(/authTokenEnvVar must be an env var NAME/);
+  });
+
+  it("rejects lowercase authTokenEnvVar", () => {
+    expect(() => new OllamaEngine({
+      url: "https://o.example.com",
+      authTokenEnvVar: "ollama_token",
+    })).toThrow(/authTokenEnvVar must be an env var NAME/);
+  });
+
+  it("rejects empty authTokenEnvVar string", () => {
+    expect(() => new OllamaEngine({
+      url: "https://o.example.com",
+      authTokenEnvVar: "",
+    })).toThrow(/authTokenEnvVar must be a non-empty env var NAME/);
+  });
+
+  it("error message does NOT echo the secret value (length only)", () => {
+    try {
+      new OllamaEngine({
+        url: "https://o.example.com",
+        authTokenEnvVar: "sk-LEAK-DO-NOT-LOG-THIS",
+      });
+      throw new Error("did not throw");
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).not.toContain("sk-LEAK-DO-NOT-LOG-THIS");
+      expect(msg).toContain("length");
+    }
+  });
 });
 
 // ─── OpenAI: construction-time config validation ─────────────────────
@@ -142,6 +180,35 @@ describe("OpenAIEngine: construction-time validation", () => {
       });
     } finally {
       delete process.env.CUSTOM_OPENAI_KEY;
+    }
+  });
+
+  it("rejects apiKeyEnvVar that looks like a raw API key (sk-…)", () => {
+    expect(() =>
+      new OpenAIEngine({ apiKeyEnvVar: "sk-proj-abc123" }),
+    ).toThrow(/apiKeyEnvVar must be an env var NAME/);
+  });
+
+  it("rejects apiKeyEnvVar that contains lowercase", () => {
+    expect(() =>
+      new OpenAIEngine({ apiKeyEnvVar: "openai_api_key" }),
+    ).toThrow(/apiKeyEnvVar must be an env var NAME/);
+  });
+
+  it("rejects apiKeyEnvVar with leading digit", () => {
+    expect(() => new OpenAIEngine({ apiKeyEnvVar: "1KEY" })).toThrow(
+      /apiKeyEnvVar must be an env var NAME/,
+    );
+  });
+
+  it("error message does NOT echo the secret value (length only)", () => {
+    try {
+      new OpenAIEngine({ apiKeyEnvVar: "sk-LEAK-DO-NOT-LOG-OAI" });
+      throw new Error("did not throw");
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).not.toContain("sk-LEAK-DO-NOT-LOG-OAI");
+      expect(msg).toContain("length");
     }
   });
 });

@@ -35,6 +35,31 @@ What works on the HTTP-loop engines vs. the CLI engines:
 
 A cron that uses any ❌ feature MUST stay on Claude. Eligibility is per-cron, not engine-wide.
 
+## Release notes (V1)
+
+### `apiKeyEnvVar` / `authTokenEnvVar` store the env var NAME, not the value
+
+The config fields `engines.openai.apiKeyEnvVar` and
+`engines.ollama.authTokenEnvVar` take the **name** of an environment
+variable (e.g. `"OPENAI_API_KEY"`), not the secret itself. The engine
+reads `process.env[name]` at construction.
+
+The constructors validate the field against the POSIX env-var-name
+regex `^[A-Z_][A-Z0-9_]*$`. If the value looks like a secret (contains
+hyphens, lowercase, `/`, etc.) the engine throws at construction with
+guidance:
+
+> `openai.apiKeyEnvVar must be an env var NAME matching [A-Z_][A-Z0-9_]* (e.g. "OPENAI_API_KEY"), not the secret value itself. Got a string of length 47. Set openai.apiKeyEnvVar to the env var name; put the actual secret in your shell / .env file.`
+
+The error never echoes the value (we don't want a misconfigured config
+file leaking the secret into gateway logs).
+
+**Recommended pattern:** leave the fields at their defaults
+(`OPENAI_API_KEY` / `OLLAMA_TOKEN`) and source the secret from
+`~/.jinn/.env` per the existing jin convention. Only set
+`apiKeyEnvVar`/`authTokenEnvVar` when you need to point at a
+differently-named env var (e.g. running multiple OpenAI accounts).
+
 ## Startup contract (read this before opting in)
 
 **Declaring `engines.ollama` or `engines.openai` in `config.yaml` is a

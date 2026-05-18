@@ -23,7 +23,7 @@ import { buildToolRegistry, type ToolRegistry } from "./tools/index.js";
 import { runAgentLoop, type AgentLoopResult } from "./agentLoop.js";
 import type { AuditLogger } from "./audit.js";
 import type { ProviderCall } from "./providers/types.js";
-import { rejectUnsupported } from "./ollama.js";
+import { rejectUnsupported, assertEnvVarName } from "./ollama.js";
 
 const DEFAULT_MAX_TURNS = 25;
 const DEFAULT_LOOP_TIMEOUT_MS = 300_000;
@@ -43,6 +43,7 @@ export class OpenAIEngine implements Engine {
 
   constructor(config: OpenAIConfig, opts: { audit?: AuditLogger } = {}) {
     const apiKeyEnvVar = config.apiKeyEnvVar ?? "OPENAI_API_KEY";
+    assertEnvVarName("openai.apiKeyEnvVar", apiKeyEnvVar);
     const apiKey = process.env[apiKeyEnvVar];
     if (!apiKey || apiKey.length === 0) {
       throw new Error(

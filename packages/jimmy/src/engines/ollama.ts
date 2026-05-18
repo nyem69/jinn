@@ -50,6 +50,7 @@ export class OllamaEngine implements Engine {
     }
 
     const tokenEnvVar = config.authTokenEnvVar ?? "OLLAMA_TOKEN";
+    assertEnvVarName("ollama.authTokenEnvVar", tokenEnvVar);
     const token = process.env[tokenEnvVar];
 
     this.provider = createOllamaProvider({ baseUrl: config.url, token });
@@ -170,4 +171,29 @@ export function rejectUnsupported(engineName: string, runOpts: EngineRunOpts): s
     return `${engineName}: cliFlags are not supported (engine is HTTP-based, has no CLI)`;
   }
   return undefined;
+}
+
+/**
+ * Posix-shell env var names: leading [A-Z_], then [A-Z0-9_]. Refuses
+ * lowercase or anything containing "-", "/", ".", etc. — catches the
+ * common operator mistake of pasting the secret VALUE
+ * (e.g. "sk-abc123…") into apiKeyEnvVar / authTokenEnvVar instead of
+ * an env var NAME (e.g. "OPENAI_API_KEY"). The error message NEVER
+ * echoes the value — we don't know if it's a secret, so we mask it.
+ */
+const ENV_VAR_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
+
+export function assertEnvVarName(fieldPath: string, value: string): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(
+      `${fieldPath} must be a non-empty env var NAME (e.g. "OPENAI_API_KEY"). Did you paste the secret value by mistake?`,
+    );
+  }
+  if (!ENV_VAR_NAME_RE.test(value)) {
+    throw new Error(
+      `${fieldPath} must be an env var NAME matching [A-Z_][A-Z0-9_]* (e.g. "OPENAI_API_KEY"), ` +
+        `not the secret value itself. Got a string of length ${value.length}. ` +
+        `Set ${fieldPath} to the env var name; put the actual secret in your shell / .env file.`,
+    );
+  }
 }
