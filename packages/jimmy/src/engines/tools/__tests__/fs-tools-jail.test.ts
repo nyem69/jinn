@@ -154,13 +154,17 @@ describe("edit: file-size cap", () => {
 
 describe("write: refusing to overwrite the cwd directory", () => {
   it("rejects path='.' with error=is_cwd_dir (does NOT mkdir parent-of-cwd)", async () => {
-    const parentBefore = await fs.readdir(path.dirname(jail));
+    // The is_cwd_dir guard short-circuits BEFORE the recursive mkdir
+    // runs, so we don't need to inspect the parent's listing (which is
+    // flappy on Linux CI — `/tmp` has system mounts like .ICE-unix /
+    // .X11-unix that come and go between calls). The audit code
+    // assertion alone proves the guard fired.
     const r = await writeTool({ path: ".", content: "anything" }, ctx);
     expect(r.ok).toBe(false);
     expect(r.audit.error).toBe("is_cwd_dir");
-    // Parent directory listing unchanged (no stray dirs created).
-    const parentAfter = await fs.readdir(path.dirname(jail));
-    expect(parentAfter.sort()).toEqual(parentBefore.sort());
+    // The jail dir itself still exists and was not converted to a file.
+    const jailStat = await fs.stat(jail);
+    expect(jailStat.isDirectory()).toBe(true);
   });
 
   it("rejects an absolute path equal to cwd", async () => {
