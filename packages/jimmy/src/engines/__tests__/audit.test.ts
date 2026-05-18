@@ -146,13 +146,47 @@ describe("audit: buildAuditRow keeps NO content / stdout / stderr / body", () =>
       },
     };
     const row = buildAuditRow("read", { path: "x.txt" }, result, 5);
-    // Whitelist of allowed keys
+    // Whitelist of allowed keys. sessionId + engineName are populated
+    // by the agent loop from ToolExecutionContext; they're optional in
+    // the shape but always present (possibly undefined) on the object.
     expect(Object.keys(row).sort()).toEqual(
-      ["argsSummary", "durationMs", "error", "exitCode", "httpStatus", "resultBytes", "toolName", "truncated"].sort(),
+      [
+        "argsSummary",
+        "durationMs",
+        "engineName",
+        "error",
+        "exitCode",
+        "httpStatus",
+        "resultBytes",
+        "sessionId",
+        "toolName",
+        "truncated",
+      ].sort(),
     );
     // Sanity: no content leak
     const serialized = JSON.stringify(row);
     expect(serialized).not.toContain("FULL FILE CONTENTS");
+  });
+
+  it("populates sessionId + engineName when scope is provided (Phase 7a)", () => {
+    const result: ToolResult = {
+      ok: true,
+      content: "x",
+      audit: { truncated: false },
+    };
+    const row = buildAuditRow("read", { path: "x.txt" }, result, 1, {
+      sessionId: "sess-42",
+      engineName: "ollama",
+    });
+    expect(row.sessionId).toBe("sess-42");
+    expect(row.engineName).toBe("ollama");
+  });
+
+  it("leaves sessionId + engineName undefined when scope is omitted", () => {
+    const result: ToolResult = { ok: true, content: "", audit: { truncated: false } };
+    const row = buildAuditRow("read", {}, result, 1);
+    expect(row.sessionId).toBeUndefined();
+    expect(row.engineName).toBeUndefined();
   });
 
   it("captures bash exit_code", () => {

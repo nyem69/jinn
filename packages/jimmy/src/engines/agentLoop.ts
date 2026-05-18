@@ -212,7 +212,10 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
       const toolDurationMs = Date.now() - callStart;
 
       if (opts.audit) {
-        const row = buildAuditRow(tc.name, tc.arguments, result, toolDurationMs);
+        const row = buildAuditRow(tc.name, tc.arguments, result, toolDurationMs, {
+          sessionId: opts.toolContext.sessionId,
+          engineName: opts.toolContext.engineName,
+        });
         await safeAudit(opts.audit, row, tc.name);
       }
 

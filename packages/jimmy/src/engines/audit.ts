@@ -137,6 +137,19 @@ export interface AuditRow {
   exitCode: number | null;
   /** HTTP status for webfetch, else null. */
   httpStatus: number | null;
+  /**
+   * Jin session id this call belongs to. Populated by the agent loop
+   * from ToolExecutionContext.sessionId when present. Optional in the
+   * type so V1 callers that build AuditRows directly (tests) compile,
+   * but persistence layers (SqliteAuditLogger) require it.
+   */
+  sessionId?: string;
+  /**
+   * Engine name (e.g. "ollama", "openai") that ran the tool call.
+   * Populated by the agent loop from ToolExecutionContext.engineName.
+   * Same persistence contract as sessionId.
+   */
+  engineName?: string;
 }
 
 export interface AuditLogger {
@@ -149,6 +162,7 @@ export function buildAuditRow(
   args: JsonObject,
   result: ToolResult,
   durationMs: number,
+  scope?: { sessionId?: string; engineName?: string },
 ): AuditRow {
   const audit = result.audit;
   const resultBytes = pickNumber(audit, [
@@ -166,6 +180,8 @@ export function buildAuditRow(
     resultBytes,
     exitCode: pickNumber(audit, ["exit_code"]),
     httpStatus: pickNumber(audit, ["http_status"]),
+    sessionId: scope?.sessionId,
+    engineName: scope?.engineName,
   };
 }
 
