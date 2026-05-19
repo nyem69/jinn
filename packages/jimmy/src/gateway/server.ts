@@ -14,6 +14,7 @@ import { ClaudeEngine } from "../engines/claude.js";
 import { CodexEngine } from "../engines/codex.js";
 import { GeminiEngine } from "../engines/gemini.js";
 import { handleApiRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
+import type { AuditLogger } from "../engines/audit.js";
 import { ensureFilesDir } from "./files.js";
 import { initStt } from "../stt/stt.js";
 import { startWatchers, stopWatchers, syncSkillSymlinks } from "./watcher.js";
@@ -141,6 +142,17 @@ export async function startGateway(
   engines.set("codex", codexEngine);
   engines.set("gemini", geminiEngine);
 
+  // Audit sink for HTTP-loop engines. Constructed once and shared across
+  // ollama/openai — both wrappers receive the same instance, which writes
+  // one row per tool call into tool_call_log (migrations/0007). The sink
+  // is constructed only when at least one HTTP engine is configured so
+  // the import isn't paid for in claude-only deployments.
+  let httpEnginesAudit: AuditLogger | undefined;
+  if (config.engines.ollama || config.engines.openai) {
+    const { SqliteAuditLogger } = await import("../engines/sqliteAuditLogger.js");
+    httpEnginesAudit = new SqliteAuditLogger(initDb());
+  }
+
   // HTTP-loop engines: register ONLY when configured, so /api/status and
   // route-resolution errors reflect what's actually available.
   //
@@ -152,7 +164,7 @@ export async function startGateway(
   if (config.engines.ollama) {
     try {
       const { OllamaEngine } = await import("../engines/ollama.js");
-      engines.set("ollama", new OllamaEngine(config.engines.ollama));
+      engines.set("ollama", new OllamaEngine(config.engines.ollama, { audit: httpEnginesAudit }));
       logger.info("engine registered: ollama");
     } catch (err) {
       throw new Error(
@@ -164,7 +176,7 @@ export async function startGateway(
   if (config.engines.openai) {
     try {
       const { OpenAIEngine } = await import("../engines/openai.js");
-      engines.set("openai", new OpenAIEngine(config.engines.openai));
+      engines.set("openai", new OpenAIEngine(config.engines.openai, { audit: httpEnginesAudit }));
       logger.info("engine registered: openai");
     } catch (err) {
       throw new Error(
