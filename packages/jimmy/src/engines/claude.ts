@@ -5,6 +5,30 @@ import { isDeadSessionError } from "../shared/rateLimit.js";
 import { ClaudeStreamParser } from "./claude/parser.js";
 import { dispatchParserOutput, getClaudeTransport } from "./claude/emitter.js";
 
+/** Build the Claude CLI argv for a one-shot run. Extracted (and exported) so
+ *  the flag/ordering logic is unit-testable without spawning a process. */
+export function buildClaudeArgs(opts: EngineRunOpts, streaming: boolean): string[] {
+  const args = ["-p", "--output-format", streaming ? "stream-json" : "json", "--verbose", "--dangerously-skip-permissions", "--chrome"];
+  if (streaming) args.push("--include-partial-messages");
+  if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.effortLevel && opts.effortLevel !== "default") args.push("--effort", opts.effortLevel);
+  if (opts.systemPrompt) args.push("--append-system-prompt", opts.systemPrompt);
+  let prompt = opts.prompt;
+  if (opts.attachments?.length) {
+    prompt += "\n\nAttached files:\n" + opts.attachments.map((a) => `- ${a}`).join("\n");
+  }
+  // Prompt MUST come before --mcp-config because --mcp-config is variadic
+  // and would consume the prompt as another config path.
+  args.push(prompt);
+  if (opts.mcpConfigPath) args.push("--mcp-config", opts.mcpConfigPath);
+  // Strict mode: use ONLY mcpConfigPath, ignoring ~/.claude.json — keeps the
+  // dev MCP toolbox (and any malformed schema in it) out of automation.
+  if (opts.strictMcp) args.push("--strict-mcp-config");
+  if (opts.cliFlags?.length) args.push(...opts.cliFlags);
+  return args;
+}
+
 interface LiveProcess {
   proc: ChildProcess;
   terminationReason: string | null;
@@ -107,23 +131,7 @@ export class ClaudeEngine implements InterruptibleEngine {
 
   private async runOnce(opts: EngineRunOpts): Promise<EngineResult> {
     const streaming = !!opts.onStream;
-    const args = ["-p", "--output-format", streaming ? "stream-json" : "json", "--verbose", "--dangerously-skip-permissions", "--chrome"];
-
-    if (streaming) args.push("--include-partial-messages");
-    if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
-    if (opts.model) args.push("--model", opts.model);
-    if (opts.effortLevel && opts.effortLevel !== "default") args.push("--effort", opts.effortLevel);
-    if (opts.systemPrompt) args.push("--append-system-prompt", opts.systemPrompt);
-    let prompt = opts.prompt;
-    if (opts.attachments?.length) {
-      prompt += "\n\nAttached files:\n" + opts.attachments.map((a) => `- ${a}`).join("\n");
-    }
-    // Prompt MUST come before --mcp-config because --mcp-config is variadic
-    // and would consume the prompt as another config path
-    args.push(prompt);
-
-    if (opts.mcpConfigPath) args.push("--mcp-config", opts.mcpConfigPath);
-    if (opts.cliFlags?.length) args.push(...opts.cliFlags);
+    const args = buildClaudeArgs(opts, streaming);
 
     const bin = opts.bin || "claude";
     logger.info(
