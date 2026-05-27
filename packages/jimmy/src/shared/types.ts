@@ -38,6 +38,10 @@ export interface EngineRunOpts {
   cliFlags?: string[];
   /** Path to MCP config JSON file (passed as --mcp-config to Claude Code) */
   mcpConfigPath?: string;
+  /** When true, pass --strict-mcp-config so the CLI uses ONLY mcpConfigPath
+   *  and ignores user/project-scoped (~/.claude.json) MCP servers. Set for
+   *  cron/automation sessions to keep the dev toolbox out of automation. */
+  strictMcp?: boolean;
   onStream?: (delta: StreamDelta) => void;
   /** Unique Jinn session ID for tracking the spawned process. */
   sessionId?: string;
