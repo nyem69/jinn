@@ -439,6 +439,7 @@ export class SessionManager {
         effortLevel,
         cliFlags: employee?.cliFlags,
         mcpConfigPath,
+        strictMcp: session.source === "cron",
         attachments: attachments.length > 0 ? attachments : undefined,
         sessionId: session.id,
         onStream: hookOnStream,
@@ -684,6 +685,7 @@ export class SessionManager {
               effortLevel,
               cliFlags: employee?.cliFlags,
               mcpConfigPath,
+              strictMcp: session.source === "cron",
               attachments: attachments.length > 0 ? attachments : undefined,
               sessionId: session.id,
             });
