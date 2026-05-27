@@ -34,6 +34,7 @@ import { loadJobs } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
 import { checkBudget } from "../gateway/budgets.js";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../mcp/resolver.js";
+import { validateServers } from "../mcp/validate.js";
 import { compactSession, resolveCompactionConfig } from "./compact.js";
 import { HookRunner } from "../hooks/index.js";
 
@@ -297,8 +298,14 @@ export class SessionManager {
           : this.config.engines.claude;
       if (session.engine === "claude") {
         const mcpConfig = resolveMcpServers(this.config.mcp, employee);
-        if (Object.keys(mcpConfig.mcpServers).length > 0) {
-          mcpConfigPath = writeMcpConfigFile(mcpConfig, session.id);
+        // Hardening: drop any server whose tools/list carries an API-invalid
+        // schema (top-level combinator) so it can't 400 the whole session.
+        const { servers, quarantined } = await validateServers(mcpConfig.mcpServers);
+        if (quarantined.length) {
+          logger.warn(`[mcp] quarantined ${quarantined.length} server(s) for session ${session.id}: ${quarantined.map((q) => `${q.server}/${q.tool}(${q.reason})`).join(", ")}`);
+        }
+        if (Object.keys(servers).length > 0) {
+          mcpConfigPath = writeMcpConfigFile({ mcpServers: servers }, session.id);
         }
       }
 
