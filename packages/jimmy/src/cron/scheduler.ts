@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import cron from "node-cron";
 import type {
   CronJob,
@@ -13,6 +14,38 @@ let tasks: cron.ScheduledTask[] = [];
 let currentSessionManager: SessionManager;
 let currentConfig: JinnConfig;
 let currentConnectors: Map<string, Connector>;
+
+// Signature of the last set of jobs successfully passed to scheduleJobs().
+// The reconciler (cron/reconciler.ts) diffs this against the persisted
+// jobs.json signature on a timer to catch silent file-watcher drops —
+// see nyem69/jinn#15.
+let lastScheduledSig = "";
+
+/**
+ * Canonical hash of the *enabled* jobs' scheduling-relevant fields.
+ * Includes prompt/engine/model/employee because runCronJob captures these
+ * at schedule time — editing any of them in jobs.json must trigger a
+ * rescheduling pass for the live closure to pick up the change.
+ */
+export function signatureOfJobs(jobs: CronJob[]): string {
+  const slim = jobs
+    .filter((j) => j.enabled)
+    .map((j) => ({
+      id: j.id,
+      schedule: j.schedule,
+      timezone: j.timezone ?? null,
+      engine: j.engine ?? null,
+      model: j.model ?? null,
+      employee: j.employee ?? null,
+      prompt: j.prompt ?? null,
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return crypto.createHash("sha1").update(JSON.stringify(slim)).digest("hex");
+}
+
+export function getScheduledSignature(): string {
+  return lastScheduledSig;
+}
 
 export function startScheduler(
   jobs: CronJob[],
@@ -57,6 +90,7 @@ function scheduleJobs(jobs: CronJob[]): void {
     tasks.push(task);
     logger.info(`Scheduled cron job "${job.name}" (${job.schedule})`);
   }
+  lastScheduledSig = signatureOfJobs(jobs);
 }
 
 export async function triggerCronJob(idOrName: string): Promise<CronJob | undefined> {

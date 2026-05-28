@@ -101,31 +101,66 @@ export function syncSkillSymlinks(): void {
   }
 }
 
+/**
+ * Resilient single-file watcher.
+ *
+ * Watches the *parent directory* filtered to a single file (depth 0).
+ * Why: atomic-rename writes (vim, git checkout, many editors) unlink the
+ * original inode and create a new one. A direct file watch's underlying
+ * fs handle becomes invalid in that case and chokidar silently stops
+ * emitting events — which was the root cause of nyem69/jinn#15. A
+ * directory watch persists across inode replacements, and listening for
+ * both `change` and `add` catches in-place edits *and* atomic replaces.
+ */
+function watchSingleFile(
+  filePath: string,
+  label: string,
+  callback: () => void,
+  debounceMs: number,
+): FSWatcher {
+  const dir = path.dirname(filePath);
+  const file = path.basename(filePath);
+  const w = watch(dir, {
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 300 },
+    depth: 0,
+    ignored: (p) => {
+      // The watched directory itself must not be ignored.
+      if (path.resolve(p) === path.resolve(dir)) return false;
+      return path.basename(p) !== file;
+    },
+  });
+  const fire = debounce(() => {
+    logger.info(`${label} changed, reloading...`);
+    try {
+      callback();
+    } catch (err) {
+      logger.warn(`${label} reload callback failed: ${(err as Error).message ?? err}`);
+    }
+  }, debounceMs);
+  w.on("change", fire);
+  w.on("add", fire); // atomic replace lands here, not "change"
+  w.on("error", (err) => {
+    logger.warn(`${label} watcher error: ${(err as Error).message ?? err}`);
+  });
+  return w;
+}
+
 export function startWatchers(callbacks: WatcherCallbacks): void {
   const DEBOUNCE_MS = 500;
 
-  const configWatcher = watch(CONFIG_PATH, {
-    ignoreInitial: true,
-    awaitWriteFinish: { stabilityThreshold: 300 },
-  });
-  configWatcher.on(
-    "change",
-    debounce(() => {
-      logger.info("config.yaml changed, reloading...");
-      callbacks.onConfigReload();
-    }, DEBOUNCE_MS),
+  const configWatcher = watchSingleFile(
+    CONFIG_PATH,
+    "config.yaml",
+    callbacks.onConfigReload,
+    DEBOUNCE_MS,
   );
 
-  const cronWatcher = watch(CRON_JOBS, {
-    ignoreInitial: true,
-    awaitWriteFinish: { stabilityThreshold: 300 },
-  });
-  cronWatcher.on(
-    "change",
-    debounce(() => {
-      logger.info("cron/jobs.json changed, reloading...");
-      callbacks.onCronReload();
-    }, DEBOUNCE_MS),
+  const cronWatcher = watchSingleFile(
+    CRON_JOBS,
+    "cron/jobs.json",
+    callbacks.onCronReload,
+    DEBOUNCE_MS,
   );
 
   const orgWatcher = watch(ORG_DIR, {

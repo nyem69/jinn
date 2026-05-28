@@ -25,6 +25,7 @@ import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { TelegramConnector } from "../connectors/telegram/index.js";
 import { loadJobs } from "../cron/jobs.js";
 import { startScheduler, reloadScheduler, stopScheduler } from "../cron/scheduler.js";
+import { startCronReconciler, stopCronReconciler } from "../cron/reconciler.js";
 import { scanOrg } from "./org.js";
 
 
@@ -584,6 +585,10 @@ export async function startGateway(
   // Start cron scheduler
   const cronJobs = loadJobs();
   startScheduler(cronJobs, sessionManager, config, connectorMap);
+  // Belt-and-suspenders for the file-watcher path: periodically diff the
+  // persisted jobs.json signature against the live scheduler and force a
+  // reload on divergence. See nyem69/jinn#15.
+  startCronReconciler();
   logger.info(`Loaded ${cronJobs.length} cron job(s)`);
 
   // Mutable config reference for hot-reload
@@ -822,7 +827,8 @@ export async function startGateway(
     claudeEngine.killAll();
     codexEngine.killAll();
 
-    // Stop cron scheduler
+    // Stop cron scheduler + reconciler
+    stopCronReconciler();
     stopScheduler();
 
     // Stop connectors
