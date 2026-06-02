@@ -5,6 +5,9 @@ import { appendRunLog } from "./jobs.js";
 import { scanOrg, findEmployee } from "../gateway/org.js";
 import { CronConnector } from "../connectors/cron/index.js";
 import type { SessionManager } from "../sessions/manager.js";
+import { resolveJobBudget, SESSION_BUDGET_STOP_PREFIX } from "../sessions/budget.js";
+import { getSession } from "../sessions/registry.js";
+import { opsAlert } from "../shared/ops-alert.js";
 
 export async function runCronJob(
   job: CronJob,
@@ -28,6 +31,8 @@ export async function runCronJob(
     const orgRegistry = scanOrg();
     employee = findEmployee(job.employee, orgRegistry);
   }
+
+  const budget = resolveJobBudget(job, config);
 
   const connector = new CronConnector(connectors, delivery);
   const startedAt = new Date().toISOString();
@@ -59,6 +64,7 @@ export async function runCronJob(
           cronJobName: job.name,
           deliveryConnector: delivery?.connector ?? null,
           deliveryChannel: delivery?.channel ?? null,
+          sessionBudget: { maxTurns: budget.maxTurns, sideEffects: budget.sideEffects },
         },
       },
       connector,
@@ -71,16 +77,25 @@ export async function runCronJob(
     );
 
     const durationMs = Date.now() - startTime;
+    const finalSession = routeResult?.sessionId ? getSession(routeResult.sessionId) : undefined;
+    const budgetStopped = !!finalSession?.lastError?.startsWith(SESSION_BUDGET_STOP_PREFIX);
     appendRunLog(job.id, {
       timestamp: startedAt,
       sessionKey,
       sessionId: routeResult?.sessionId ?? null,
-      status: "success",
+      status: budgetStopped ? "session_budget_stop" : "success",
       durationMs,
-      error: null,
+      error: budgetStopped ? finalSession?.lastError ?? null : null,
+      ...(budgetStopped ? { maxTurns: budget.maxTurns, actualTurns: finalSession?.totalTurns ?? null } : {}),
       resultPreview: null,
     });
-    logger.info(`Cron job "${job.name}" completed in ${durationMs}ms`);
+    if (budgetStopped && budget.sideEffects) {
+      await opsAlert(
+        `Cron "${job.name}" (${job.id}) hit its turn-budget cap (${budget.maxTurns}) and was stopped mid-task ` +
+        `after ~${finalSession?.totalTurns ?? "?"} turns. This job is flagged sideEffects:true — check for partial external writes.`,
+      ).catch(() => {});
+    }
+    logger.info(`Cron job "${job.name}" ${budgetStopped ? "stopped at turn budget" : "completed"} in ${durationMs}ms`);
 
     // Latency alert: warn if job exceeded threshold
     const thresholdMs = config.cron?.alertThresholdMs;
