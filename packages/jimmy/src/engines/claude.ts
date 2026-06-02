@@ -4,6 +4,7 @@ import { logger } from "../shared/logger.js";
 import { isDeadSessionError } from "../shared/rateLimit.js";
 import { ClaudeStreamParser } from "./claude/parser.js";
 import { dispatchParserOutput, getClaudeTransport } from "./claude/emitter.js";
+import { isBudgetStop } from "../sessions/budget.js";
 
 /** Build the Claude CLI argv for a one-shot run. Extracted (and exported) so
  *  the flag/ordering logic is unit-testable without spawning a process. */
@@ -107,6 +108,9 @@ export class ClaudeEngine implements InterruptibleEngine {
 
       // If the process was intentionally killed, don't retry
       if (result.error.startsWith("Interrupted")) return result;
+
+      // A turn-budget stop is a deliberate ceiling, not a flaky failure — never retry it.
+      if (isBudgetStop(result)) return result;
 
       // Dead session (expired/invalid --resume ID) — clear the stale ID so the
       // next attempt (if any) starts fresh instead of retrying the same dead session.
@@ -515,6 +519,7 @@ export class ClaudeEngine implements InterruptibleEngine {
       cost: typeof resultEvent.total_cost_usd === "number" ? (resultEvent.total_cost_usd as number) : undefined,
       durationMs: typeof resultEvent.duration_ms === "number" ? (resultEvent.duration_ms as number) : undefined,
       numTurns: typeof resultEvent.num_turns === "number" ? (resultEvent.num_turns as number) : undefined,
+      subtype: typeof resultEvent.subtype === "string" ? (resultEvent.subtype as string) : undefined,
       ...(rateLimit ? { rateLimit } : {}),
     };
   }
@@ -606,6 +611,7 @@ export class ClaudeEngine implements InterruptibleEngine {
       cost: typeof result.total_cost_usd === "number" ? result.total_cost_usd : undefined,
       durationMs: typeof result.duration_ms === "number" ? result.duration_ms : undefined,
       numTurns: typeof result.num_turns === "number" ? result.num_turns : undefined,
+      subtype: typeof result.subtype === "string" ? result.subtype : undefined,
     };
   }
 
