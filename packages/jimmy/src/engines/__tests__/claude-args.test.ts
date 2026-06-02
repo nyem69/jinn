@@ -19,4 +19,20 @@ describe("buildClaudeArgs", () => {
     const args = buildClaudeArgs({ ...base, mcpConfigPath: "/tmp/m.json", strictMcp: true }, false);
     expect(args.indexOf("hi")).toBeLessThan(args.indexOf("--mcp-config"));
   });
+
+  it("adds --max-turns with the value when maxTurns is a positive number", () => {
+    const args = buildClaudeArgs({ ...base, maxTurns: 300 }, false);
+    const i = args.indexOf("--max-turns");
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(args[i + 1]).toBe("300");
+  });
+
+  it("omits --max-turns when maxTurns is unset", () => {
+    expect(buildClaudeArgs({ ...base }, false)).not.toContain("--max-turns");
+  });
+
+  it("omits --max-turns when maxTurns is zero or negative", () => {
+    expect(buildClaudeArgs({ ...base, maxTurns: 0 }, false)).not.toContain("--max-turns");
+    expect(buildClaudeArgs({ ...base, maxTurns: -5 }, false)).not.toContain("--max-turns");
+  });
 });

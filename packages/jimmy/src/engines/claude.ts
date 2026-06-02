@@ -13,6 +13,7 @@ export function buildClaudeArgs(opts: EngineRunOpts, streaming: boolean): string
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   if (opts.model) args.push("--model", opts.model);
   if (opts.effortLevel && opts.effortLevel !== "default") args.push("--effort", opts.effortLevel);
+  if (typeof opts.maxTurns === "number" && opts.maxTurns > 0) args.push("--max-turns", String(opts.maxTurns));
   if (opts.systemPrompt) args.push("--append-system-prompt", opts.systemPrompt);
   let prompt = opts.prompt;
   if (opts.attachments?.length) {
