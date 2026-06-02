@@ -45,6 +45,10 @@ export interface EngineRunOpts {
   onStream?: (delta: StreamDelta) => void;
   /** Unique Jinn session ID for tracking the spawned process. */
   sessionId?: string;
+  /** Per-run agent-turn ceiling. Passed to the Claude CLI as --max-turns.
+   *  Claude-only; other engines ignore it. Set by SessionManager for
+   *  autonomous (cron) sessions from the resolved session budget. */
+  maxTurns?: number;
 }
 
 export interface EngineResult {
@@ -54,6 +58,10 @@ export interface EngineResult {
   durationMs?: number;
   numTurns?: number;
   error?: string;
+  /** Raw result subtype reported by the engine (Claude CLI result event),
+   *  e.g. "success" | "error_max_turns" | "error_during_execution".
+   *  Preserved generically — only classifiers special-case values. */
+  subtype?: string;
   /**
    * Optional rate limit metadata returned by an engine.
    * `resetsAt` is a Unix timestamp in seconds.
@@ -192,6 +200,19 @@ export interface CronJob {
   employee?: string;
   prompt: string;
   delivery?: CronDelivery;
+  /** Per-job override of the autonomous turn ceiling (else global default). */
+  maxTurns?: number;
+  /** Session-budget controls for this job. */
+  sessionBudget?: {
+    /** Set false to opt this job OUT of the turn ceiling entirely. */
+    hardCap?: boolean;
+    /** Free-text justification for an opt-out (documentation only). */
+    reason?: string;
+    /** True if this job mutates external state (writes/publishes/delivers).
+     *  Owners of such jobs MUST set this so a budget stop raises an ops alert
+     *  instead of being runlog-only. Default false = no alert. */
+    sideEffects?: boolean;
+  };
 }
 
 export interface CronDelivery {
@@ -487,6 +508,11 @@ export interface JinnConfig {
     rateLimitStrategy?: "wait" | "fallback";
     /** Engine to use when rateLimitStrategy="fallback". Default: "codex" */
     fallbackEngine?: "codex";
+    /** Default autonomous (cron) turn ceiling. Default 300. Per-job override
+     *  via CronJob.maxTurns; opt out via CronJob.sessionBudget.hardCap=false. */
+    budget?: {
+      maxTurns?: number;
+    };
     /** Session compaction settings — summarize old messages to bound context */
     compaction?: {
       enabled?: boolean;
