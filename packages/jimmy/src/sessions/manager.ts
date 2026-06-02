@@ -37,6 +37,7 @@ import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../
 import { validateServers } from "../mcp/validate.js";
 import { compactSession, resolveCompactionConfig } from "./compact.js";
 import { HookRunner } from "../hooks/index.js";
+import { isAutonomousSource, isBudgetStop, budgetContractPrompt, SESSION_BUDGET_STOP_PREFIX } from "./budget.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -411,6 +412,22 @@ export class SessionManager {
         if (hookResult.systemPrompt) systemPrompt = hookResult.systemPrompt;
       }
 
+      // Autonomous turn budget: the cron runner stashes the resolved cap in
+      // transportMeta.sessionBudget. Read it AFTER pre-session hooks so a hook
+      // that replaces systemPrompt can't erase the contract.
+      const sessionBudgetMeta = (session.transportMeta as Record<string, unknown> | null)?.["sessionBudget"] as
+        | { maxTurns?: number | null }
+        | undefined;
+      const budgetCap =
+        isAutonomousSource(session.source) &&
+        typeof sessionBudgetMeta?.maxTurns === "number" &&
+        sessionBudgetMeta.maxTurns > 0
+          ? sessionBudgetMeta.maxTurns
+          : null;
+      if (budgetCap) {
+        systemPrompt += "\n\n" + budgetContractPrompt(budgetCap);
+      }
+
       // Build onStream callback for tool hooks (observe tool usage in real time)
       const hookOnStream = this.hookRunner?.hasToolHooks()
         ? (delta: import("../shared/types.js").StreamDelta) => {
@@ -450,7 +467,42 @@ export class SessionManager {
         attachments: attachments.length > 0 ? attachments : undefined,
         sessionId: session.id,
         onStream: hookOnStream,
+        maxTurns: budgetCap ?? undefined,
       });
+
+      // Turn-budget stop — classify BEFORE dead-session / rate-limit / reply
+      // handling so it isn't misread as a crash or a normal assistant message.
+      if (budgetCap && isBudgetStop(result)) {
+        logger.warn(`Session ${session.id} hit turn budget cap (${budgetCap}, ran ${result.numTurns ?? "?"} turns)`);
+        if (result.cost || result.numTurns) {
+          accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
+        }
+        this.hookRunner?.firePostSession({
+          sessionId: session.id,
+          engine: session.engine,
+          model: session.model ?? engineConfig.model,
+          employee: employee?.name,
+          result: result.result,
+          error: `${SESSION_BUDGET_STOP_PREFIX} hit max-turns cap (${budgetCap})`,
+          cost: result.cost,
+          durationMs: result.durationMs,
+          numTurns: result.numTurns,
+          timestamp: new Date().toISOString(),
+        });
+        if (decorateMessages && connector.setTypingStatus) {
+          await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
+        }
+        if (decorateMessages && capabilities.reactions) {
+          await connector.removeReaction(target, "eyes").catch(() => {});
+        }
+        updateSession(session.id, {
+          ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
+          status: "interrupted",
+          lastActivity: new Date().toISOString(),
+          lastError: `${SESSION_BUDGET_STOP_PREFIX} hit max-turns cap (${budgetCap})`,
+        });
+        return;
+      }
 
       const wasInterrupted = result.error?.startsWith("Interrupted");
 
@@ -695,9 +747,32 @@ export class SessionManager {
               strictMcp: session.source === "cron",
               attachments: attachments.length > 0 ? attachments : undefined,
               sessionId: session.id,
+              maxTurns: budgetCap ?? undefined,
             });
 
             const retryInterrupted = retryResult.error?.startsWith("Interrupted");
+
+            // Turn-budget stop on a post-rate-limit retry — classify, don't deliver.
+            if (budgetCap && isBudgetStop(retryResult)) {
+              logger.warn(`Session ${session.id} hit turn budget cap on retry (${budgetCap})`);
+              if (retryResult.cost || retryResult.numTurns) {
+                accumulateSessionCost(session.id, retryResult.cost ?? 0, retryResult.numTurns ?? 1);
+              }
+              if (decorateMessages && connector.setTypingStatus) {
+                await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
+              }
+              if (decorateMessages && capabilities.reactions) {
+                await connector.removeReaction(target, "eyes").catch(() => {});
+                await connector.removeReaction(target, waitEmoji).catch(() => {});
+              }
+              updateSession(session.id, {
+                ...(retryResult.sessionId?.trim() ? { engineSessionId: retryResult.sessionId } : {}),
+                status: "interrupted",
+                lastActivity: new Date().toISOString(),
+                lastError: `${SESSION_BUDGET_STOP_PREFIX} hit max-turns cap (${budgetCap})`,
+              });
+              return;
+            }
             const retryRateLimit = !retryInterrupted ? detectRateLimit(retryResult) : { limited: false as const };
             if (retryRateLimit.limited) {
               recordClaudeRateLimit(retryRateLimit.resetsAt);
