@@ -43,9 +43,18 @@ The honest enforcement point is the CLI's own `--max-turns` flag.
 
 ## Scope
 
-- **Applies to:** sessions where `source ∈ {cron, sdk}` (autonomous, no human).
+- **Applies to:** sessions where `source === "cron"` (autonomous, no human),
+  which flow through `SessionManager.runSession`.
+- **`sdk` deliberately deferred:** there is no `sdk` source today. `POST
+  /api/sessions` creates `source: "web"` and runs via the separate
+  `dispatchWebSessionRun` path in `gateway/api.ts` — **not** `runSession`. Capping
+  API-created autonomous sessions would require either a new SDK/API source or
+  wiring the cap into `dispatchWebSessionRun`; that is its own design. v1 is
+  **cron-only** so the cap lands on the one path that demonstrably produces the
+  marathon spend.
 - **Excluded:** `interactive`, `web`, `slack`, and any other human-driven
-  source — already covered by the `UserPromptSubmit` guard.
+  source — already covered by the `UserPromptSubmit` guard (interactive) or out
+  of scope (web/api).
 - **Out of scope for v1:** any formal continuation-artifact schema, stream-level
   turn parsing, cross-trigger accumulation. Deferred until system-steward data
   shows which jobs actually need a formal handoff contract.
@@ -72,7 +81,8 @@ post-run classification.
 
 Isolated, unit-testable. Exposes:
 
-- `isAutonomousSource(source: string): boolean` → `source === "cron" || source === "sdk"`.
+- `isAutonomousSource(source: string): boolean` → `source === "cron"` (v1).
+  Defined as a helper so the `sdk`/api path can be added in one place later.
 - `resolveJobBudget(job, config): { maxTurns: number | null; sideEffects: boolean }`
   — used by the cron runner. Precedence:
   1. `job.sessionBudget?.hardCap === false` → `maxTurns: null` (**uncapped**;
@@ -87,11 +97,19 @@ positive number is the ceiling.
 ### 3. Enforcement (`packages/jimmy/src/engines/claude.ts`)
 
 `buildClaudeArgs` pushes `--max-turns <n>` when `opts.maxTurns` is a positive
-number. Claude-CLI-only; other engines (codex/gemini/http-loop) ignore the opt.
+number (guard against `0`/negative). Claude-CLI-only; other engines
+(codex/gemini/http-loop) ignore the opt.
 
 The two result builders (`buildEngineResultFromResultEvent`, `extractResult`)
 populate `subtype` from `resultEvent.subtype` / `result.subtype` when present —
 generically, no value filtering.
+
+**Do not retry `error_max_turns`.** `ClaudeEngine.run` has an internal transient
+retry loop (`MAX_RETRIES`, matches `ECONNRESET`/`503`/`overloaded`/…). A
+max-turns stop almost certainly won't match those patterns today, but now that
+`subtype` is parsed, make non-retry **intentional**: if the result's
+`subtype === "error_max_turns"`, return immediately without a transient retry. A
+budget-stop is a deliberate ceiling, not a flaky failure.
 
 ### 4. Prompt contract + wiring (`packages/jimmy/src/sessions/manager.ts`)
 
@@ -99,17 +117,40 @@ In `runSession`, for autonomous + capped sessions:
 
 - Read the resolved budget from `session.transportMeta.sessionBudget`
   (`{ maxTurns, sideEffects }`, stashed by the runner — keeps `runSession`
-  decoupled from `cron/jobs.json` parsing). If `maxTurns` is a positive number:
-  - Append `budgetContractPrompt(cap)` to the system prompt.
-  - Pass `maxTurns: cap` to `engine.run({...})`.
-- After the run returns, classify **strictly** on
-  `result.subtype === "error_max_turns"` (never `numTurns >= cap` — a clean
-  agent may finish exactly at the cap; turn count is logging/context only). On a
-  budget-stop:
+  decoupled from `cron/jobs.json` parsing). `cap = maxTurns` when a positive
+  number, else no cap.
+- **Inject the contract after pre-session hooks.** The contract must be appended
+  to the *final* system prompt that reaches `engine.run` — i.e. **after** the
+  `runPreSession` hook runs, because a blocking hook may *replace* `systemPrompt`
+  (`if (hookResult.systemPrompt) systemPrompt = hookResult.systemPrompt`) and
+  would otherwise erase a contract appended earlier. Append (or re-append)
+  `budgetContractPrompt(cap)` to `systemPrompt` immediately before the first
+  `engine.run`, only when `cap` is set.
+- Pass `maxTurns: cap` to `engine.run({...})`.
+
+**Classify the budget-stop immediately after `engine.run` returns — before any
+other result handling.** Today the result flows through dead-session detection →
+rate-limit detection/Codex fallback → `responseText` insertion → episode logging
+→ final status update. Insert the `error_max_turns` branch *first* (right after
+`const result = await engine.run(...)`, before `isDeadSessionError` and
+`detectRateLimit`), or a budget-stop gets misread as a dead session, a generic
+engine error, or a normal assistant message. Classify **strictly** on
+`result.subtype === "error_max_turns"` (never `numTurns >= cap` — a clean agent
+may finish exactly at the cap; turn count is logging/context only). On a
+budget-stop:
   - Set session `status: "interrupted"` (cut off by a limit, not a crash).
   - Set `lastError` to a sentinel-prefixed string:
     `session_budget_stop: hit max-turns cap (<cap>)`.
-  - Do not emit a generic `Error: …` reply for this case.
+  - Do not emit a generic `Error: …` reply; skip dead-session/rate-limit
+    handling and `return` (after firing `firePostSession` and clearing UI
+    decorations, mirroring the normal completion teardown).
+
+**Rate-limit retry path must carry the cap.** `runSession` can call `engine.run`
+again *inside* the Claude usage-limit retry loop (and once more in the Codex
+fallback). Each such call must:
+  - pass the same `maxTurns: cap` (Claude retry only — see below), and
+  - run the same `error_max_turns` classification on its result.
+Otherwise a capped cron silently becomes **uncapped** after a usage-limit wait.
 
 The budget contract block (short, advisory):
 
@@ -123,6 +164,14 @@ ceiling the process is force-stopped with no output saved.
   write a short continuation note (done / remaining / next step) into your normal
   output so the next run can resume.
 ```
+
+**Codex fallback caveat.** When Claude is rate-limited and `runSession` falls
+back to Codex, there is **no hard `--max-turns` equivalent** — hard enforcement
+is Claude-only. The fallback keeps the prompt contract (it's engine-agnostic
+advisory text), so do **not** pass `maxTurns` to the Codex `engine.run`, and the
+Codex result has no `error_max_turns` subtype to classify. A capped cron that
+falls back to Codex is advisory-only for that run; this is an accepted v1 limit
+(Codex is the rare rate-limit fallback, not the steady-state autonomous path).
 
 ### 5. Runlog + alert (`packages/jimmy/src/cron/runner.ts`)
 
@@ -154,12 +203,17 @@ cron scheduler
        budget = resolveJobBudget(job, cfg) [sessions/budget.ts]
        route({ ...msg, transportMeta.sessionBudget = budget })
             └─ runSession(session)         [sessions/manager.ts]
-                 if isAutonomousSource && budget.maxTurns:
-                   systemPrompt += budgetContractPrompt(cap)
-                   result = engine.run({ ..., maxTurns: cap })   [engines/claude.ts]
-                              → buildClaudeArgs pushes --max-turns
-                   if result.subtype === "error_max_turns":
-                     status=interrupted, lastError="session_budget_stop: …"
+                 runPreSession hook (may replace systemPrompt)
+                 if isAutonomousSource("cron") && budget.maxTurns:
+                   systemPrompt += budgetContractPrompt(cap)   # AFTER hooks
+                 result = engine.run({ ..., maxTurns: cap })   [engines/claude.ts]
+                            → buildClaudeArgs pushes --max-turns
+                            → ClaudeEngine.run: no transient retry on error_max_turns
+                 # FIRST branch, before dead-session / rate-limit handling:
+                 if result.subtype === "error_max_turns":
+                   status=interrupted, lastError="session_budget_stop: …"; return
+                 # (retry loop + Codex fallback also pass cap / re-classify;
+                 #  Codex fallback is advisory-only — no hard cap)
        (route resolves)
        if budget-stopped (sentinel on lastError):
          appendRunLog(status="session_budget_stop", {maxTurns, actualTurns})
@@ -170,8 +224,10 @@ cron scheduler
 
 - **No cap configured / opt-out:** no `--max-turns` flag, no contract block —
   behavior identical to today. Fully backward compatible.
-- **Non-cron/sdk sources:** untouched.
-- **Non-Claude engines:** `maxTurns` opt is ignored by the engine.
+- **Non-cron sources:** untouched (web/api goes through `dispatchWebSessionRun`,
+  not `runSession`).
+- **Non-Claude engines / Codex rate-limit fallback:** `maxTurns` opt is ignored;
+  hard enforcement is Claude-only, prompt contract still applies.
 - **`opsAlert` failure:** already fail-soft (logs, never throws).
 - **Missing `subtype` in result:** classifier simply doesn't fire — degrades to
   prior behavior (generic completion/error), never a false budget-stop.
@@ -184,9 +240,12 @@ cron scheduler
   (`job.maxTurns`), global default (300), `sideEffects` propagation.
 - `subtype` capture: result builder preserves an arbitrary subtype string
   (generic), and `error_max_turns` specifically.
+- `ClaudeEngine.run`: `error_max_turns` is **not** transient-retried (returns
+  on first occurrence).
 - Optional: a `runSession` classification check (subtype → interrupted +
-  sentinel) if a lightweight harness exists; otherwise covered by the unit
-  pieces above.
+  sentinel, fired before dead-session/rate-limit handling; retry-path call also
+  carries `maxTurns`) if a lightweight harness exists; otherwise covered by the
+  unit pieces above.
 
 ## Files
 
