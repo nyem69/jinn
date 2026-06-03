@@ -9,12 +9,29 @@ import { resolveJobBudget, SESSION_BUDGET_STOP_PREFIX } from "../sessions/budget
 import { getSession } from "../sessions/registry.js";
 import { opsAlert } from "../shared/ops-alert.js";
 
+/** Provenance for a catch-up replay (a fire the host slept through). */
+export interface CronRunMeta {
+  catchUp?: boolean;
+  /** ISO timestamp of the scheduled fire being replayed. */
+  scheduledFor?: string;
+  /** In-window earlier occurrences collapsed by the latest-only policy. */
+  olderFiresSkipped?: number;
+}
+
 export async function runCronJob(
   job: CronJob,
   sessionManager: SessionManager,
   config: JinnConfig,
   connectors: Map<string, Connector>,
+  meta?: CronRunMeta,
 ): Promise<void> {
+  const catchUpFields = meta?.catchUp
+    ? {
+        catchUp: true,
+        scheduledFor: meta.scheduledFor ?? null,
+        olderFiresSkipped: meta.olderFiresSkipped ?? 0,
+      }
+    : {};
   const startTime = Date.now();
   logger.info(`Cron job "${job.name}" (${job.id}) starting`);
 
@@ -87,6 +104,7 @@ export async function runCronJob(
       durationMs,
       error: budgetStopped ? finalSession?.lastError ?? null : null,
       ...(budgetStopped ? { maxTurns: budget.maxTurns, actualTurns: finalSession?.totalTurns ?? null } : {}),
+      ...catchUpFields,
       resultPreview: null,
     });
     if (budgetStopped && budget.sideEffects) {
@@ -124,6 +142,7 @@ export async function runCronJob(
       status: "error",
       durationMs: Date.now() - startTime,
       error: message,
+      ...catchUpFields,
       resultPreview: null,
     });
     logger.error(`Cron job "${job.name}" failed: ${message}`);

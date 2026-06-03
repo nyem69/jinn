@@ -9,6 +9,18 @@ import { runCronJob } from "./runner.js";
 import { logger } from "../shared/logger.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { loadJobs, saveJobs } from "./jobs.js";
+import {
+  computeMissedFires,
+  readCheckpoint,
+  writeCheckpoint,
+  lastRunAtFromDisk,
+} from "./catchup.js";
+import { CRON_CATCHUP_STATE, CRON_RUNS } from "../shared/paths.js";
+
+const CATCHUP_MAX_LOOKBACK_MS = 72 * 60 * 60 * 1000; // 72h
+const CATCHUP_GRACE_MS = 90 * 1000;
+const CATCHUP_DEDUP_SLOP_MS = 60 * 1000;
+let catchUpInFlight = false;
 
 let tasks: cron.ScheduledTask[] = [];
 let currentSessionManager: SessionManager;
@@ -57,6 +69,69 @@ export function startScheduler(
   currentConfig = config;
   currentConnectors = connectors;
   scheduleJobs(jobs);
+  // Replay any fire the host slept (or was down) through since the last sweep.
+  void catchUpMissed();
+}
+
+/**
+ * Replay scheduled fires missed while the host slept (node-cron's minute-tick
+ * is suspended during macOS sleep and never replays a passed minute). Driven
+ * fire-and-forget from startScheduler and each reconciler tick (the first
+ * post-wake tick runs this). Replays only the latest missed occurrence per
+ * eligible job; run-log dedup + a grace window prevent double-firing on-time
+ * runs. See cron/catchup.ts for the pure decision logic.
+ */
+export async function catchUpMissed(now: number = Date.now()): Promise<void> {
+  if (!currentSessionManager) return; // scheduler not started yet
+  if (catchUpInFlight) return; // don't overlap sweeps
+  catchUpInFlight = true;
+  const lastCheck = readCheckpoint(CRON_CATCHUP_STATE) ?? now;
+  try {
+    const { replay, tooOld } = computeMissedFires(loadJobs(), {
+      now,
+      lastCheck,
+      maxLookbackMs: CATCHUP_MAX_LOOKBACK_MS,
+      graceMs: CATCHUP_GRACE_MS,
+      dedupSlopMs: CATCHUP_DEDUP_SLOP_MS,
+      lastRunAt: (id) => lastRunAtFromDisk(id, CRON_RUNS),
+    });
+    const lookbackH = Math.round(CATCHUP_MAX_LOOKBACK_MS / 3_600_000);
+    for (const t of tooOld) {
+      logger.warn(
+        `Cron catch-up: "${t.job.name}" (${t.job.id}) missed fire at ` +
+          `${new Date(t.scheduledFor).toISOString()} is older than the ${lookbackH}h ` +
+          `lookback — not replaying.`,
+      );
+    }
+    for (const m of replay) {
+      const scheduledFor = new Date(m.scheduledFor).toISOString();
+      const extra = m.olderFiresSkipped
+        ? ` (+${m.olderFiresSkipped} older occurrence(s) skipped)`
+        : "";
+      logger.info(
+        `Cron catch-up: replaying "${m.job.name}" (${m.job.id}) — missed fire ` +
+          `${scheduledFor}${extra}`,
+      );
+      await runCronJob(
+        m.job,
+        currentSessionManager,
+        currentConfig,
+        currentConnectors,
+        { catchUp: true, scheduledFor, olderFiresSkipped: m.olderFiresSkipped },
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      `Cron catch-up sweep failed: ${(err as Error).message ?? err}`,
+    );
+  } finally {
+    try {
+      writeCheckpoint(CRON_CATCHUP_STATE, now);
+    } catch {
+      /* best-effort checkpoint */
+    }
+    catchUpInFlight = false;
+  }
 }
 
 export function reloadScheduler(jobs: CronJob[]): void {

@@ -128,6 +128,42 @@ describe("runCronJob — latency alerting", () => {
     );
   });
 
+  it("records catch-up metadata in the run-log when replayed", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+    const sessionManager = makeMockSessionManager(0);
+    const config = makeConfig();
+
+    await runCronJob(makeJob(), sessionManager, config, connectors, {
+      catchUp: true,
+      scheduledFor: "2026-06-01T06:00:00.000Z",
+      olderFiresSkipped: 2,
+    });
+
+    expect(appendRunLog).toHaveBeenCalledWith(
+      "test-job",
+      expect.objectContaining({
+        status: "success",
+        catchUp: true,
+        scheduledFor: "2026-06-01T06:00:00.000Z",
+        olderFiresSkipped: 2,
+      }),
+    );
+  });
+
+  it("omits catch-up fields on a normal (non-replayed) run", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+    const sessionManager = makeMockSessionManager(0);
+    const config = makeConfig();
+
+    await runCronJob(makeJob(), sessionManager, config, connectors);
+
+    const entry = (appendRunLog as any).mock.calls.at(-1)[1];
+    expect(entry.catchUp).toBeUndefined();
+    expect(entry.scheduledFor).toBeUndefined();
+  });
+
   it("does not double-alert on failure (only failure alert, not latency)", async () => {
     const connector = makeMockConnector();
     const connectors = new Map<string, Connector>([["slack", connector]]);

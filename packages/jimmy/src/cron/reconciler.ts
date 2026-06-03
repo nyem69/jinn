@@ -4,6 +4,7 @@ import {
   reloadScheduler,
   getScheduledSignature,
   signatureOfJobs,
+  catchUpMissed,
 } from "./scheduler.js";
 
 /**
@@ -51,15 +52,20 @@ export function tickReconciler(): boolean {
     const jobs = loadJobs();
     const persisted = signatureOfJobs(jobs);
     const live = getScheduledSignature();
+    let reloaded = false;
     if (persisted !== live) {
       logger.warn(
         `Cron reconciler: persisted jobs.json diverges from live scheduler ` +
           `(live=${live.slice(0, 8) || "<none>"} persisted=${persisted.slice(0, 8)}); forcing reloadScheduler`,
       );
       reloadScheduler(jobs);
-      return true;
+      reloaded = true;
     }
-    return false;
+    // Post-wake hook: this tick is the first to run after the host wakes, so
+    // sweep for fires the sleeping process missed. Fire-and-forget; guarded
+    // against overlap internally.
+    void catchUpMissed();
+    return reloaded;
   } catch (err) {
     logger.warn(
       `Cron reconciler tick failed: ${(err as Error).message ?? err}`,

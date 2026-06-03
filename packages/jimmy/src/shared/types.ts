@@ -200,6 +200,9 @@ export interface CronJob {
   employee?: string;
   prompt: string;
   delivery?: CronDelivery;
+  /** Set false to opt this job OUT of missed-fire catch-up replay after the
+   *  host sleeps through a scheduled fire. Default (undefined) = eligible. */
+  catchUp?: boolean;
   /** Per-job override of the autonomous turn ceiling (else global default). */
   maxTurns?: number;
   /** Session-budget controls for this job. */
