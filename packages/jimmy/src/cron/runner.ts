@@ -18,6 +18,26 @@ export interface CronRunMeta {
   olderFiresSkipped?: number;
 }
 
+/**
+ * ms epoch of each job's most recent *start*, recorded synchronously the moment
+ * runCronJob is invoked — i.e. before the (often multi-minute) LLM session it
+ * awaits. The run-log on disk is only written when the session COMPLETES, so a
+ * job that is still running has no fresh disk entry; without this, the ~5-min
+ * catch-up sweep sees a stale run-log and wrongly replays the slot the live
+ * scheduler already fired (every cron whose runtime outlasts the gap to the next
+ * sweep would double-fire). Catch-up dedup consults this alongside the disk log.
+ *
+ * Intentionally in-memory only: lost on process restart, which is correct — a
+ * fresh start must fall back to the on-disk run-log so genuinely-missed fires
+ * (slept/crashed through) still replay.
+ */
+const lastStartedAt = new Map<string, number>();
+
+/** ms epoch of a job's most recent in-process start, or null if none this run. */
+export function lastStartedAtMs(jobId: string): number | null {
+  return lastStartedAt.get(jobId) ?? null;
+}
+
 export async function runCronJob(
   job: CronJob,
   sessionManager: SessionManager,
@@ -25,6 +45,7 @@ export async function runCronJob(
   connectors: Map<string, Connector>,
   meta?: CronRunMeta,
 ): Promise<void> {
+  lastStartedAt.set(job.id, Date.now());
   const catchUpFields = meta?.catchUp
     ? {
         catchUp: true,
