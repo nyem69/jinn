@@ -309,8 +309,10 @@ export interface McpServerStdioConfig {
 
 /** HTTP/SSE-based MCP server (remote URL) */
 export interface McpServerUrlConfig {
-  /** Transport type — Claude Code requires "sse" for URL-based servers */
-  type?: "sse";
+  /** Transport type for URL-based servers. "http" = native streamable-HTTP
+   *  (Claude Code's modern transport), "sse" = legacy SSE. Defaults to "sse"
+   *  in the resolver for back-compat when omitted. */
+  type?: "sse" | "http";
   /** URL of the MCP server (HTTP streamable or SSE transport) */
   url: string;
   /** Optional headers for authentication */

@@ -124,8 +124,9 @@ function buildAvailableServers(config: McpGlobalConfig): Record<string, McpServe
       if (serverConfig.enabled === false) continue;
       const { enabled, ...rest } = serverConfig;
 
-      // URL-based MCP server (HTTP/SSE transport)
-      // Claude Code requires "type": "sse" for URL-based servers
+      // URL-based MCP server (HTTP/SSE transport). Defaults to "sse" for
+      // back-compat; an explicit `type` in config (e.g. "http") overrides it
+      // because `...rest` is spread after the default.
       if ("url" in rest && (rest as McpServerUrlConfig).url) {
         servers[name] = { type: "sse", ...rest } as McpServerConfig;
         continue;
