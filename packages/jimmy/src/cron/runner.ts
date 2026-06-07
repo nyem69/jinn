@@ -8,6 +8,7 @@ import type { SessionManager } from "../sessions/manager.js";
 import { resolveJobBudget, SESSION_BUDGET_STOP_PREFIX } from "../sessions/budget.js";
 import { getSession } from "../sessions/registry.js";
 import { opsAlert } from "../shared/ops-alert.js";
+import { runPrecheck } from "./precheck.js";
 
 /** Provenance for a catch-up replay (a fire the host slept through). */
 export interface CronRunMeta {
@@ -55,6 +56,54 @@ export async function runCronJob(
     : {};
   const startTime = Date.now();
   logger.info(`Cron job "${job.name}" (${job.id}) starting`);
+
+  // Deterministic pre-gate: run a cheap shell check BEFORE creating the
+  // (expensive) LLM session, and skip the session entirely when there's no
+  // work. See CronJob.precheck for the exit-code contract.
+  if (job.precheck) {
+    const precheckStartedAt = new Date().toISOString();
+    const pc = await runPrecheck(job.precheck);
+    if (pc.decision !== "proceed") {
+      const durationMs = Date.now() - startTime;
+      const isSkip = pc.decision === "skip";
+      appendRunLog(job.id, {
+        timestamp: precheckStartedAt,
+        sessionKey: null,
+        sessionId: null,
+        status: isSkip ? "gated-skip" : "precheck_error",
+        durationMs,
+        precheck: {
+          exitCode: pc.exitCode,
+          timedOut: pc.timedOut,
+          durationMs: pc.durationMs,
+          stderr: pc.stderr.slice(0, 500),
+        },
+        error: isSkip
+          ? null
+          : `precheck failed (exit ${pc.exitCode ?? "?"}${pc.timedOut ? ", timed out" : ""}): ${pc.stderr.slice(0, 200)}`,
+        ...catchUpFields,
+        resultPreview: null,
+      });
+      if (isSkip) {
+        logger.info(
+          `Cron job "${job.name}" (${job.id}) gated-skip via precheck (exit ${pc.exitCode}) in ${durationMs}ms`,
+        );
+      } else {
+        logger.error(
+          `Cron job "${job.name}" (${job.id}) precheck error (exit ${pc.exitCode ?? "none"}, timedOut=${pc.timedOut})`,
+        );
+        // A precheck ERROR is an unexpected failure (not a normal no-work skip) — surface it.
+        await opsAlert(
+          `Cron "${job.name}" (${job.id}) precheck FAILED — exit ${pc.exitCode ?? "none"}${pc.timedOut ? " (timed out)" : ""}. ` +
+            `No session was spawned. stderr: ${pc.stderr.slice(0, 300) || "(none)"}`,
+        ).catch(() => {});
+      }
+      return;
+    }
+    logger.debug(
+      `Cron job "${job.name}" (${job.id}) precheck passed (exit 0) in ${pc.durationMs}ms — proceeding`,
+    );
+  }
 
   const delivery = job.delivery || config.cron?.defaultDelivery;
   const cooSlug = config.portal?.portalName?.toLowerCase() || "jinn";

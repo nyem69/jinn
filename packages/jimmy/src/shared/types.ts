@@ -216,6 +216,28 @@ export interface CronJob {
      *  instead of being runlog-only. Default false = no alert. */
     sideEffects?: boolean;
   };
+  /** Optional deterministic gate run BEFORE any LLM session is created. Lets a
+   *  cheap shell command decide whether the (expensive) session is worth
+   *  spawning — e.g. a watcher whose prefilter usually finds no work. The
+   *  command runs via `/bin/bash -c` in JINN_HOME with the gateway's env.
+   *
+   *  Exit-code contract:
+   *   - 0                     → PROCEED (spawn the session as normal)
+   *   - code ∈ skipExitCodes  → gated-skip (no session, no alert, runlog only)
+   *   - any other non-zero    → precheck_error (no session, ops alert) — so a
+   *                             real failure the script exits non-zero on (e.g.
+   *                             a dependency outage) is NOT silently skipped
+   *   - timeout               → precheck_error
+   *  `skipExitCodes` is required to get any skip behaviour; if omitted/empty,
+   *  every non-zero exit is an error (fail loud, never skip blind). */
+  precheck?: {
+    /** Shell command run before session creation (via `/bin/bash -c`). */
+    command: string;
+    /** Max run time before the gate is killed and treated as an error. Default 60000. */
+    timeoutMs?: number;
+    /** Exit codes that mean "no work — skip this fire" (gated-skip). */
+    skipExitCodes?: number[];
+  };
 }
 
 export interface CronDelivery {
