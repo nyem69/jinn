@@ -131,6 +131,22 @@ export function computeMissedFires(
   return { replay, tooOld };
 }
 
+/**
+ * Combine a job's on-disk last-run with its in-memory last-start (either may be
+ * null), returning the more recent. The in-memory start covers an on-time fire
+ * that is still running and has not yet written its completion entry to the
+ * run-log — without it, catch-up would replay a slot the live scheduler already
+ * fired. See runner.ts `lastStartedAt` for why the start is tracked in memory.
+ */
+export function mostRecentRun(
+  disk: number | null,
+  started: number | null,
+): number | null {
+  if (disk === null) return started;
+  if (started === null) return disk;
+  return Math.max(disk, started);
+}
+
 /** Read the persisted last-sweep checkpoint (ms epoch), or null. */
 export function readCheckpoint(file: string): number | null {
   try {

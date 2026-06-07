@@ -8,6 +8,7 @@ import type { SessionManager } from "../sessions/manager.js";
 import { resolveJobBudget, SESSION_BUDGET_STOP_PREFIX } from "../sessions/budget.js";
 import { getSession } from "../sessions/registry.js";
 import { opsAlert } from "../shared/ops-alert.js";
+import { runPrecheck } from "./precheck.js";
 
 /** Provenance for a catch-up replay (a fire the host slept through). */
 export interface CronRunMeta {
@@ -18,6 +19,26 @@ export interface CronRunMeta {
   olderFiresSkipped?: number;
 }
 
+/**
+ * ms epoch of each job's most recent *start*, recorded synchronously the moment
+ * runCronJob is invoked — i.e. before the (often multi-minute) LLM session it
+ * awaits. The run-log on disk is only written when the session COMPLETES, so a
+ * job that is still running has no fresh disk entry; without this, the ~5-min
+ * catch-up sweep sees a stale run-log and wrongly replays the slot the live
+ * scheduler already fired (every cron whose runtime outlasts the gap to the next
+ * sweep would double-fire). Catch-up dedup consults this alongside the disk log.
+ *
+ * Intentionally in-memory only: lost on process restart, which is correct — a
+ * fresh start must fall back to the on-disk run-log so genuinely-missed fires
+ * (slept/crashed through) still replay.
+ */
+const lastStartedAt = new Map<string, number>();
+
+/** ms epoch of a job's most recent in-process start, or null if none this run. */
+export function lastStartedAtMs(jobId: string): number | null {
+  return lastStartedAt.get(jobId) ?? null;
+}
+
 export async function runCronJob(
   job: CronJob,
   sessionManager: SessionManager,
@@ -25,6 +46,7 @@ export async function runCronJob(
   connectors: Map<string, Connector>,
   meta?: CronRunMeta,
 ): Promise<void> {
+  lastStartedAt.set(job.id, Date.now());
   const catchUpFields = meta?.catchUp
     ? {
         catchUp: true,
@@ -34,6 +56,54 @@ export async function runCronJob(
     : {};
   const startTime = Date.now();
   logger.info(`Cron job "${job.name}" (${job.id}) starting`);
+
+  // Deterministic pre-gate: run a cheap shell check BEFORE creating the
+  // (expensive) LLM session, and skip the session entirely when there's no
+  // work. See CronJob.precheck for the exit-code contract.
+  if (job.precheck) {
+    const precheckStartedAt = new Date().toISOString();
+    const pc = await runPrecheck(job.precheck);
+    if (pc.decision !== "proceed") {
+      const durationMs = Date.now() - startTime;
+      const isSkip = pc.decision === "skip";
+      appendRunLog(job.id, {
+        timestamp: precheckStartedAt,
+        sessionKey: null,
+        sessionId: null,
+        status: isSkip ? "gated-skip" : "precheck_error",
+        durationMs,
+        precheck: {
+          exitCode: pc.exitCode,
+          timedOut: pc.timedOut,
+          durationMs: pc.durationMs,
+          stderr: pc.stderr.slice(0, 500),
+        },
+        error: isSkip
+          ? null
+          : `precheck failed (exit ${pc.exitCode ?? "?"}${pc.timedOut ? ", timed out" : ""}): ${pc.stderr.slice(0, 200)}`,
+        ...catchUpFields,
+        resultPreview: null,
+      });
+      if (isSkip) {
+        logger.info(
+          `Cron job "${job.name}" (${job.id}) gated-skip via precheck (exit ${pc.exitCode}) in ${durationMs}ms`,
+        );
+      } else {
+        logger.error(
+          `Cron job "${job.name}" (${job.id}) precheck error (exit ${pc.exitCode ?? "none"}, timedOut=${pc.timedOut})`,
+        );
+        // A precheck ERROR is an unexpected failure (not a normal no-work skip) — surface it.
+        await opsAlert(
+          `Cron "${job.name}" (${job.id}) precheck FAILED — exit ${pc.exitCode ?? "none"}${pc.timedOut ? " (timed out)" : ""}. ` +
+            `No session was spawned. stderr: ${pc.stderr.slice(0, 300) || "(none)"}`,
+        ).catch(() => {});
+      }
+      return;
+    }
+    logger.debug(
+      `Cron job "${job.name}" (${job.id}) precheck passed (exit 0) in ${pc.durationMs}ms — proceeding`,
+    );
+  }
 
   const delivery = job.delivery || config.cron?.defaultDelivery;
   const cooSlug = config.portal?.portalName?.toLowerCase() || "jinn";

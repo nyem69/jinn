@@ -7,6 +7,7 @@ import {
   readCheckpoint,
   writeCheckpoint,
   lastRunAtFromDisk,
+  mostRecentRun,
 } from "../catchup.js";
 import type { CronJob } from "../../shared/types.js";
 
@@ -170,6 +171,48 @@ describe("checkpoint persistence", () => {
   it("returns null when no checkpoint file exists", () => {
     const file = path.join(os.tmpdir(), `cc-missing-${Math.floor(NOW)}.json`);
     expect(readCheckpoint(file)).toBeNull();
+  });
+});
+
+describe("mostRecentRun", () => {
+  it("returns the in-memory start when the disk log is empty", () => {
+    // An on-time fire still running: nothing on disk yet, but a start is tracked.
+    expect(mostRecentRun(null, ms("2026-06-03T01:00:00Z"))).toBe(
+      ms("2026-06-03T01:00:00Z"),
+    );
+  });
+
+  it("returns the disk run when there is no in-memory start", () => {
+    // Fresh process (restart): in-memory map empty, fall back to the run-log.
+    expect(mostRecentRun(ms("2026-06-03T01:00:00Z"), null)).toBe(
+      ms("2026-06-03T01:00:00Z"),
+    );
+  });
+
+  it("returns null when both are absent", () => {
+    expect(mostRecentRun(null, null)).toBeNull();
+  });
+
+  it("prefers the more recent of the two", () => {
+    const older = ms("2026-06-02T01:00:00Z");
+    const newer = ms("2026-06-03T01:00:00Z");
+    expect(mostRecentRun(older, newer)).toBe(newer);
+    expect(mostRecentRun(newer, older)).toBe(newer);
+  });
+
+  it("dedups a long on-time fire whose disk log is still yesterday's run", () => {
+    // The actual production bug: yesterday's completion on disk, today's fire
+    // started but not yet logged. The merged value must clear the dedup gate so
+    // computeMissedFires does NOT replay today's slot.
+    const yesterdayOnDisk = ms("2026-06-02T01:00:03Z");
+    const startedToday = ms("2026-06-03T01:00:01Z");
+    const merged = mostRecentRun(yesterdayOnDisk, startedToday);
+    const { replay } = computeMissedFires([job({})], {
+      ...DEFAULTS,
+      lastCheck: ms("2026-06-03T00:30:00Z"),
+      lastRunAt: () => merged,
+    });
+    expect(replay).toHaveLength(0);
   });
 });
 

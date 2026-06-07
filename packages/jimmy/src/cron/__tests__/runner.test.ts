@@ -23,6 +23,13 @@ vi.mock("../../shared/logger.js", () => ({
   },
 }));
 
+// Stub the precheck gate (its own exit-code logic is unit-tested in precheck.test.ts);
+// here we control its decision to assert how runCronJob branches.
+vi.mock("../precheck.js", () => ({ runPrecheck: vi.fn() }));
+
+// Stub ops alert so a precheck_error doesn't try to reach Telegram.
+vi.mock("../../shared/ops-alert.js", () => ({ opsAlert: vi.fn().mockResolvedValue(undefined) }));
+
 function makeJob(overrides: Partial<CronJob> = {}): CronJob {
   return {
     id: "test-job",
@@ -178,5 +185,93 @@ describe("runCronJob — latency alerting", () => {
     expect(connector.sendMessage).toHaveBeenCalledTimes(1);
     const alertMsg = (connector.sendMessage as any).mock.calls[0][1];
     expect(alertMsg).toContain("failed");
+  });
+});
+
+describe("runCronJob — precheck gate", () => {
+  beforeEach(async () => {
+    // Clear accumulated call history on the module-mocked fns and re-arm async ones.
+    const { runPrecheck } = await import("../precheck.js");
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { appendRunLog } = await import("../jobs.js");
+    (runPrecheck as any).mockReset();
+    (opsAlert as any).mockReset().mockResolvedValue(undefined);
+    (appendRunLog as any).mockClear();
+  });
+
+  const withPrecheck = (overrides = {}) =>
+    makeJob({ precheck: { command: "x", skipExitCodes: [10] }, ...overrides });
+
+  it("spawns the session when precheck decides proceed", async () => {
+    const { runPrecheck } = await import("../precheck.js");
+    (runPrecheck as any).mockResolvedValue({ decision: "proceed", exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", durationMs: 5 });
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(withPrecheck(), sessionManager, makeConfig(), connectors);
+
+    expect(sessionManager.route).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT spawn a session on skip, and logs gated-skip (no alert)", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const { runPrecheck } = await import("../precheck.js");
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    (runPrecheck as any).mockResolvedValue({ decision: "skip", exitCode: 10, signal: null, timedOut: false, stdout: "", stderr: "", durationMs: 5 });
+    const sessionManager = makeMockSessionManager(0);
+    const connector = makeMockConnector();
+    const connectors = new Map<string, Connector>([["slack", connector]]);
+
+    await runCronJob(withPrecheck(), sessionManager, makeConfig(), connectors);
+
+    expect(sessionManager.route).not.toHaveBeenCalled();
+    expect(opsAlert).not.toHaveBeenCalled();
+    expect(connector.sendMessage).not.toHaveBeenCalled();
+    expect(appendRunLog).toHaveBeenCalledWith(
+      "test-job",
+      expect.objectContaining({ status: "gated-skip" }),
+    );
+  });
+
+  it("does NOT spawn a session on precheck error, logs precheck_error AND ops-alerts", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const { runPrecheck } = await import("../precheck.js");
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    (runPrecheck as any).mockResolvedValue({ decision: "error", exitCode: 21, signal: null, timedOut: false, stdout: "", stderr: "wacli down", durationMs: 5 });
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(withPrecheck(), sessionManager, makeConfig(), connectors);
+
+    expect(sessionManager.route).not.toHaveBeenCalled();
+    expect(opsAlert).toHaveBeenCalledTimes(1);
+    expect(appendRunLog).toHaveBeenCalledWith(
+      "test-job",
+      expect.objectContaining({ status: "precheck_error" }),
+    );
+  });
+
+  it("treats a precheck timeout as an error (no session)", async () => {
+    const { runPrecheck } = await import("../precheck.js");
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    (runPrecheck as any).mockResolvedValue({ decision: "error", exitCode: null, signal: "SIGTERM", timedOut: true, stdout: "", stderr: "", durationMs: 60000 });
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(withPrecheck(), sessionManager, makeConfig(), connectors);
+
+    expect(sessionManager.route).not.toHaveBeenCalled();
+    expect(opsAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores precheck entirely for jobs without a precheck field (backward compat)", async () => {
+    const { runPrecheck } = await import("../precheck.js");
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(makeJob(), sessionManager, makeConfig(), connectors);
+
+    expect(runPrecheck).not.toHaveBeenCalled();
+    expect(sessionManager.route).toHaveBeenCalledTimes(1);
   });
 });

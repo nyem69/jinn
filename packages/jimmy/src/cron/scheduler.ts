@@ -5,7 +5,7 @@ import type {
   JinnConfig,
   Connector,
 } from "../shared/types.js";
-import { runCronJob } from "./runner.js";
+import { runCronJob, lastStartedAtMs } from "./runner.js";
 import { logger } from "../shared/logger.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { loadJobs, saveJobs } from "./jobs.js";
@@ -14,6 +14,7 @@ import {
   readCheckpoint,
   writeCheckpoint,
   lastRunAtFromDisk,
+  mostRecentRun,
 } from "./catchup.js";
 import { CRON_CATCHUP_STATE, CRON_RUNS } from "../shared/paths.js";
 
@@ -93,7 +94,10 @@ export async function catchUpMissed(now: number = Date.now()): Promise<void> {
       maxLookbackMs: CATCHUP_MAX_LOOKBACK_MS,
       graceMs: CATCHUP_GRACE_MS,
       dedupSlopMs: CATCHUP_DEDUP_SLOP_MS,
-      lastRunAt: (id) => lastRunAtFromDisk(id, CRON_RUNS),
+      // Merge the on-disk run-log with the in-memory last-start so a still-running
+      // on-time fire (not yet logged to disk) is not mistaken for a missed slot.
+      lastRunAt: (id) =>
+        mostRecentRun(lastRunAtFromDisk(id, CRON_RUNS), lastStartedAtMs(id)),
     });
     const lookbackH = Math.round(CATCHUP_MAX_LOOKBACK_MS / 3_600_000);
     for (const t of tooOld) {
