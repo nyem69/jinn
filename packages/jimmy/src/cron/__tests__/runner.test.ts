@@ -30,6 +30,12 @@ vi.mock("../precheck.js", () => ({ runPrecheck: vi.fn() }));
 // Stub ops alert so a precheck_error doesn't try to reach Telegram.
 vi.mock("../../shared/ops-alert.js", () => ({ opsAlert: vi.fn().mockResolvedValue(undefined) }));
 
+// Stub the session registry. Default returns undefined (no session record),
+// which matches the prior behaviour of the success-path tests. Individual tests
+// override getSession to inject a finished session whose status the runner
+// inspects (e.g. status:"error" for the silent-spawn-failure regression).
+vi.mock("../../sessions/registry.js", () => ({ getSession: vi.fn(() => undefined) }));
+
 function makeJob(overrides: Partial<CronJob> = {}): CronJob {
   return {
     id: "test-job",
@@ -273,5 +279,64 @@ describe("runCronJob — precheck gate", () => {
 
     expect(runPrecheck).not.toHaveBeenCalled();
     expect(sessionManager.route).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("runCronJob — session ended in error without route() throwing", () => {
+  // Regression for the Jun-2026 silent cron outage: a moved Claude binary made
+  // the engine reject ("Failed to spawn Claude CLI ... ENOENT"); the session
+  // manager caught it, set session.status="error", and route() STILL resolved
+  // with a sessionId. The runner used to log "completed"/"success" with no alert.
+  // ~400 fires went dark for days. The runner must now treat an errored finished
+  // session as a cron failure: status:"error" in the run-log + an ops-alert.
+  beforeEach(async () => {
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { appendRunLog } = await import("../jobs.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    (opsAlert as any).mockReset().mockResolvedValue(undefined);
+    (appendRunLog as any).mockClear();
+    (getSession as any).mockReset().mockReturnValue(undefined);
+  });
+
+  it("logs status 'error' and fires an ops-alert when the session status is error", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    const spawnErr = "Failed to spawn Claude CLI: spawn /bad/path/claude ENOENT";
+    (getSession as any).mockReturnValue({ status: "error", lastError: spawnErr });
+
+    const sessionManager = makeMockSessionManager(0); // route resolves { sessionId: "sess-123" }
+    const connector = makeMockConnector();
+    const connectors = new Map<string, Connector>([["slack", connector]]);
+
+    await runCronJob(makeJob(), sessionManager, makeConfig(), connectors);
+
+    // run-log records the failure (not a false "success")
+    expect(appendRunLog).toHaveBeenCalledWith(
+      "test-job",
+      expect.objectContaining({ status: "error", error: spawnErr }),
+    );
+    // and an ops-alert fires carrying the underlying error
+    expect(opsAlert).toHaveBeenCalledTimes(1);
+    expect((opsAlert as any).mock.calls[0][0]).toContain("FAILED");
+    expect((opsAlert as any).mock.calls[0][0]).toContain("ENOENT");
+  });
+
+  it("still logs 'success' for a normal finished session (no false positive)", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    (getSession as any).mockReturnValue({ status: "idle", lastError: null });
+
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(makeJob(), sessionManager, makeConfig(), connectors);
+
+    expect(appendRunLog).toHaveBeenCalledWith(
+      "test-job",
+      expect.objectContaining({ status: "success" }),
+    );
+    expect(opsAlert).not.toHaveBeenCalled();
   });
 });
