@@ -166,13 +166,26 @@ export async function runCronJob(
     const durationMs = Date.now() - startTime;
     const finalSession = routeResult?.sessionId ? getSession(routeResult.sessionId) : undefined;
     const budgetStopped = !!finalSession?.lastError?.startsWith(SESSION_BUDGET_STOP_PREFIX);
+    // A session can end in ERROR without route() throwing: the engine rejects
+    // (e.g. "Failed to spawn Claude CLI" / "engine never started"), the session
+    // manager catches it, records session.status="error"+lastError, and route()
+    // still RESOLVES with a sessionId. Without this check those land as
+    // "success"/"completed" with no alert — the exact failure mode behind the
+    // Jun-2026 silent cron outage (a moved Claude binary ENOENT'd ~400 fires,
+    // every one logged "completed in 16ms"). Treat a non-budget session error as
+    // a cron failure: record it and fire an ops-alert.
+    const sessionErrored = !budgetStopped && finalSession?.status === "error";
     appendRunLog(job.id, {
       timestamp: startedAt,
       sessionKey,
       sessionId: routeResult?.sessionId ?? null,
-      status: budgetStopped ? "session_budget_stop" : "success",
+      status: budgetStopped ? "session_budget_stop" : sessionErrored ? "error" : "success",
       durationMs,
-      error: budgetStopped ? finalSession?.lastError ?? null : null,
+      error: budgetStopped
+        ? finalSession?.lastError ?? null
+        : sessionErrored
+          ? finalSession?.lastError ?? "session ended in error"
+          : null,
       ...(budgetStopped ? { maxTurns: budget.maxTurns, actualTurns: finalSession?.totalTurns ?? null } : {}),
       ...catchUpFields,
       resultPreview: null,
@@ -183,7 +196,17 @@ export async function runCronJob(
         `after ~${finalSession?.totalTurns ?? "?"} turns. This job is flagged sideEffects:true — check for partial external writes.`,
       ).catch(() => {});
     }
-    logger.info(`Cron job "${job.name}" ${budgetStopped ? "stopped at turn budget" : "completed"} in ${durationMs}ms`);
+    if (sessionErrored) {
+      logger.error(
+        `Cron job "${job.name}" (${job.id}) session ended in error in ${durationMs}ms: ${finalSession?.lastError ?? "(no message)"}`,
+      );
+      await opsAlert(
+        `Cron "${job.name}" (${job.id}) FAILED — session ended in error (engine never produced a result, no exception thrown). ` +
+          `${finalSession?.lastError?.slice(0, 300) ?? "(no error message)"}`,
+      ).catch(() => {});
+    } else {
+      logger.info(`Cron job "${job.name}" ${budgetStopped ? "stopped at turn budget" : "completed"} in ${durationMs}ms`);
+    }
 
     // Latency alert: warn if job exceeded threshold
     const thresholdMs = config.cron?.alertThresholdMs;
