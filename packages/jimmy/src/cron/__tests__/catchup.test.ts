@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   computeMissedFires,
+  checkpointFloor,
   readCheckpoint,
   writeCheckpoint,
   lastRunAtFromDisk,
@@ -80,14 +81,17 @@ describe("computeMissedFires", () => {
     expect(replay).toHaveLength(0);
   });
 
-  it("skips a fire still inside the grace window (lets node-cron handle it)", () => {
-    const { replay } = computeMissedFires([job({})], {
+  it("defers (does not replay) a fire still inside the grace window", () => {
+    const { replay, deferred } = computeMissedFires([job({})], {
       ...DEFAULTS,
       now: ms("2026-06-03T01:00:30Z"), // 30s after fire, < 90s grace
       lastCheck: ms("2026-06-03T00:30:00Z"),
       lastRunAt: () => null,
     });
     expect(replay).toHaveLength(0);
+    // Reported, not dropped — the checkpoint must be held back behind it.
+    expect(deferred).toHaveLength(1);
+    expect(deferred[0].scheduledFor).toBe(PREV_FIRE);
   });
 
   it("reports a fire older than the lookback window as tooOld, not replay", () => {
@@ -158,6 +162,81 @@ describe("computeMissedFires", () => {
       lastRunAt: (id) => (id === "ontime" ? ms("2026-06-03T01:00:02Z") : null),
     });
     expect(replay.map((r) => r.job.id)).toEqual(["missed"]);
+  });
+});
+
+/**
+ * The grace window defers a decision; the checkpoint must not bury it. These
+ * drive two consecutive sweeps and assert both failure modes stay closed:
+ * a fire the sleeping host never ran IS replayed, and one node-cron ran on time
+ * is NOT (the 2026-06-07 sitrep double-fire).
+ */
+describe("a fire deferred by the grace window, across two sweeps", () => {
+  // Host wakes 30s after the 01:00 fire — inside the 90s grace.
+  const WAKE = ms("2026-06-03T01:00:30Z");
+  const NEXT_SWEEP = ms("2026-06-03T01:05:30Z"); // reconciler tick, 5 min later
+
+  function firstSweep() {
+    const r = computeMissedFires([job({})], {
+      ...DEFAULTS,
+      now: WAKE,
+      lastCheck: ms("2026-06-03T00:30:00Z"),
+      lastRunAt: () => null, // node-cron slept through it
+    });
+    return { ...r, checkpoint: checkpointFloor(WAKE, r.deferred) };
+  }
+
+  it("holds the checkpoint behind the deferred fire instead of advancing to now", () => {
+    const { checkpoint } = firstSweep();
+    expect(checkpoint).toBe(PREV_FIRE - 1);
+    // The bug: advancing to `now` would make prevFire <= lastCheck next sweep.
+    expect(checkpoint).toBeLessThan(PREV_FIRE);
+  });
+
+  it("replays the fire on the next sweep when the host slept through it", () => {
+    const { checkpoint } = firstSweep();
+    const { replay } = computeMissedFires([job({})], {
+      ...DEFAULTS,
+      now: NEXT_SWEEP, // grace has now passed
+      lastCheck: checkpoint,
+      lastRunAt: () => null, // still never ran
+    });
+    expect(replay).toHaveLength(1);
+    expect(replay[0].scheduledFor).toBe(PREV_FIRE);
+  });
+
+  it("does NOT replay when node-cron fired it on time (no double-fire)", () => {
+    const { checkpoint } = firstSweep();
+    const { replay } = computeMissedFires([job({})], {
+      ...DEFAULTS,
+      now: NEXT_SWEEP,
+      lastCheck: checkpoint, // reconsidered — but the run-log now vetoes it
+      lastRunAt: () => ms("2026-06-03T01:00:02Z"),
+    });
+    expect(replay).toHaveLength(0);
+  });
+});
+
+describe("checkpointFloor", () => {
+  it("returns now when nothing was deferred", () => {
+    expect(checkpointFloor(NOW, [])).toBe(NOW);
+  });
+
+  it("clamps to just before the EARLIEST deferred fire", () => {
+    const early = ms("2026-06-03T01:00:00Z");
+    const late = ms("2026-06-03T01:30:00Z");
+    const floor = checkpointFloor(NOW, [
+      { job: job({ id: "late" }), scheduledFor: late },
+      { job: job({ id: "early" }), scheduledFor: early },
+    ]);
+    expect(floor).toBe(early - 1);
+  });
+
+  it("never advances the checkpoint past now", () => {
+    const future = NOW + 60_000;
+    expect(
+      checkpointFloor(NOW, [{ job: job({}), scheduledFor: future }]),
+    ).toBe(NOW);
   });
 });
 

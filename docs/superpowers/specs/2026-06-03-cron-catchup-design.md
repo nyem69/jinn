@@ -45,7 +45,8 @@ Per job, skip unless ALL hold (job eligible):
 - `prevFire = CronExpressionParser.parse(schedule, { tz: timezone, currentDate: now }).prev()`.
 - `prevFire > lastCheck` — something fired since the last sweep.
 - `prevFire <= now - graceMs` — old enough that node-cron has had its chance
-  (avoids racing/duplicating an on-time fire).
+  (avoids racing/duplicating an on-time fire). A fire inside the grace window is
+  **deferred, not dropped** — see the 2026-07-14 amendment below.
 - `lastRunAt(jobId)` is null OR `< prevFire - dedupSlopMs` — not already run
   (on-time or a prior catch-up).
 - `prevFire >= now - maxLookbackMs` — within the replay window. If the most
@@ -90,7 +91,7 @@ Unit-test `computeMissedFires` with injected `now/lastCheck/lastRunAt`:
 - slept-through fire (lastRun before prevFire) → replay once, scheduledFor = prevFire
 - already caught up (lastRun after prevFire) → skip
 - too old (prevFire < now - maxLookback) → skip + warn
-- too fresh (prevFire > now - grace) → skip
+- too fresh (prevFire > now - grace) → defer (reported, checkpoint held back)
 - `catchUp: false` → skip
 - disabled / invalid schedule → skip
 - multiple jobs mixed → only the missed eligible ones returned
@@ -102,3 +103,35 @@ Checkpoint round-trip read/write.
 - Preventing sleep (not reliably possible for clamshell-on-battery).
 - Changing awake-operation fire semantics.
 - Backfilling more than the latest occurrence (future per-job opt-in if ever needed).
+
+## Amendment 2026-07-14 — the grace window must defer, not drop
+
+**Bug.** The original rule skipped a fire inside the grace window on the reasoning
+that "node-cron has not yet had its chance." On a post-sleep wake that reasoning is
+backwards: node-cron's minute-tick was *suspended* through that minute and never
+replays it — which is the entire reason this module exists. The sweep then wrote
+`writeCheckpoint(now)` unconditionally, pushing `lastCheck` past the skipped fire,
+so the next sweep rejected it via `prevFire <= lastCheck`. The fire was gone.
+
+Net effect: **a `graceMs`-wide blind spot immediately before every wake sweep.**
+Recurring jobs hide it (they simply fire again next interval); a date-pinned
+one-shot loses its fire until the schedule next comes round.
+
+**Observed.** `manamurah-ayam-hub-verdict-ONESHOT` (`30 9 14 7 *`, Asia/Kuala_Lumpur)
+was due 2026-07-14T01:30:00Z. The host woke and swept at 01:30:59Z — 59 s < 90 s
+grace — so it was skipped, then buried. Jobs on either side of it (01:22, 01:40)
+replayed normally. Next natural fire would have been July 2027.
+
+**Fix.** `computeMissedFires` now returns `deferred: DeferredFire[]` alongside
+`replay`/`tooOld`, and `checkpointFloor(now, deferred)` clamps the persisted
+checkpoint to `min(now, earliestDeferred - 1)`. The fire is reconsidered on the
+next sweep, by which time the grace has passed and the **run-log dedup**
+(`lastRunAt >= prevFire - dedupSlopMs`, merging the on-disk run-log with the
+in-memory last-start) makes the real decision:
+
+- node-cron did fire it on time → dedup vetoes → no replay (this is what protects
+  against the 2026-06-07 sitrep double-fire; that guard is unchanged).
+- the host slept through it → no run-log entry → replayed once.
+
+The grace window keeps its anti-race role but can no longer destroy a fire. Every
+skip path in this module is now either replayed, deferred, or warned — none silent.
