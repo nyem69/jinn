@@ -11,6 +11,7 @@ import type { SessionManager } from "../sessions/manager.js";
 import { loadJobs, saveJobs } from "./jobs.js";
 import {
   computeMissedFires,
+  checkpointFloor,
   readCheckpoint,
   writeCheckpoint,
   lastRunAtFromDisk,
@@ -87,8 +88,11 @@ export async function catchUpMissed(now: number = Date.now()): Promise<void> {
   if (catchUpInFlight) return; // don't overlap sweeps
   catchUpInFlight = true;
   const lastCheck = readCheckpoint(CRON_CATCHUP_STATE) ?? now;
+  // Held back behind any fire the grace window defers, so the next sweep still
+  // sees it. Advancing straight to `now` would bury an undecided fire forever.
+  let checkpointAt = now;
   try {
-    const { replay, tooOld } = computeMissedFires(loadJobs(), {
+    const { replay, tooOld, deferred } = computeMissedFires(loadJobs(), {
       now,
       lastCheck,
       maxLookbackMs: CATCHUP_MAX_LOOKBACK_MS,
@@ -99,6 +103,14 @@ export async function catchUpMissed(now: number = Date.now()): Promise<void> {
       lastRunAt: (id) =>
         mostRecentRun(lastRunAtFromDisk(id, CRON_RUNS), lastStartedAtMs(id)),
     });
+    checkpointAt = checkpointFloor(now, deferred);
+    for (const d of deferred) {
+      logger.debug(
+        `Cron catch-up: "${d.job.name}" (${d.job.id}) fire at ` +
+          `${new Date(d.scheduledFor).toISOString()} is inside the grace window ` +
+          `— deferring the decision to the next sweep.`,
+      );
+    }
     const lookbackH = Math.round(CATCHUP_MAX_LOOKBACK_MS / 3_600_000);
     for (const t of tooOld) {
       logger.warn(
@@ -130,7 +142,7 @@ export async function catchUpMissed(now: number = Date.now()): Promise<void> {
     );
   } finally {
     try {
-      writeCheckpoint(CRON_CATCHUP_STATE, now);
+      writeCheckpoint(CRON_CATCHUP_STATE, checkpointAt);
     } catch {
       /* best-effort checkpoint */
     }

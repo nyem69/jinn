@@ -36,6 +36,12 @@ export interface TooOldSkip {
   scheduledFor: number;
 }
 
+export interface DeferredFire {
+  job: CronJob;
+  /** ms epoch of a fire still inside the grace window — decided next sweep. */
+  scheduledFor: number;
+}
+
 export interface ComputeOptions {
   now: number;
   lastCheck: number;
@@ -49,6 +55,7 @@ export interface ComputeOptions {
 export interface MissedResult {
   replay: MissedFire[];
   tooOld: TooOldSkip[];
+  deferred: DeferredFire[];
 }
 
 /** Most recent scheduled fire <= `now` for a job, or null if unparseable. */
@@ -96,6 +103,7 @@ export function computeMissedFires(
   const { now, lastCheck, maxLookbackMs, graceMs, dedupSlopMs, lastRunAt } = opts;
   const replay: MissedFire[] = [];
   const tooOld: TooOldSkip[] = [];
+  const deferred: DeferredFire[] = [];
 
   for (const job of jobs) {
     if (!job.enabled) continue;
@@ -107,8 +115,18 @@ export function computeMissedFires(
     // Nothing fired since the last sweep.
     if (prevFire <= lastCheck) continue;
 
-    // Too fresh — node-cron has not yet had its chance; avoid a double-fire.
-    if (prevFire > now - graceMs) continue;
+    // Too fresh — node-cron may not have had its chance yet; replaying now could
+    // double-fire. DEFER, do not drop: the caller must hold the checkpoint back
+    // behind this fire (see checkpointFloor) so the next sweep re-decides it once
+    // the grace has passed, where the run-log dedup below is the real guard. If
+    // we simply skipped here and the checkpoint advanced past `now`, a fire that
+    // landed in the grace window immediately before a post-wake sweep would be
+    // lost forever: node-cron's tick was suspended through it and never replays a
+    // passed minute, and the next sweep would see prevFire <= lastCheck.
+    if (prevFire > now - graceMs) {
+      deferred.push({ job, scheduledFor: prevFire });
+      continue;
+    }
 
     // Already ran (on time, or a prior catch-up).
     const ran = lastRunAt(job.id);
@@ -128,7 +146,21 @@ export function computeMissedFires(
     });
   }
 
-  return { replay, tooOld };
+  return { replay, tooOld, deferred };
+}
+
+/**
+ * The timestamp a sweep may safely persist as its checkpoint.
+ *
+ * Normally `now`. But a fire deferred by the grace window has not been decided
+ * yet — persisting `now` would push the checkpoint past it and bury it (the next
+ * sweep skips anything with `prevFire <= lastCheck`). Hold the checkpoint just
+ * behind the earliest deferred fire so it is reconsidered next sweep.
+ */
+export function checkpointFloor(now: number, deferred: DeferredFire[]): number {
+  if (deferred.length === 0) return now;
+  const earliest = Math.min(...deferred.map((d) => d.scheduledFor));
+  return Math.min(now, earliest - 1);
 }
 
 /**
