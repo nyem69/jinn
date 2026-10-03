@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CronJob } from "../shared/types.js";
 import { CRON_JOBS, CRON_RUNS } from "../shared/paths.js";
+import { recordCronPerformanceSafe } from "./performance.js";
 
 export function loadJobs(): CronJob[] {
   try {
@@ -22,4 +23,9 @@ export function appendRunLog(jobId: string, entry: object): void {
   fs.mkdirSync(CRON_RUNS, { recursive: true });
   const logPath = path.join(CRON_RUNS, `${jobId}.jsonl`);
   fs.appendFileSync(logPath, JSON.stringify(entry) + "\n", "utf-8");
+  // Every run-log entry also lands a performance_log row (see performance.ts).
+  // Hooked here rather than in the runner so all three run-log writers are
+  // covered by one call. Fire-and-forget; it never throws.
+  const job = loadJobs().find((j) => j.id === jobId);
+  void recordCronPerformanceSafe(jobId, job, entry as Record<string, unknown>);
 }
