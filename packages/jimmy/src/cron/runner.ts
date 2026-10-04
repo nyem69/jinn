@@ -7,6 +7,7 @@ import { CronConnector } from "../connectors/cron/index.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { resolveJobBudget, SESSION_BUDGET_STOP_PREFIX } from "../sessions/budget.js";
 import { getSession } from "../sessions/registry.js";
+import { SESSION_TIMEOUT_PREFIX } from "../shared/timeout.js";
 import { opsAlert } from "../shared/ops-alert.js";
 import { runPrecheck } from "./precheck.js";
 
@@ -174,19 +175,36 @@ export async function runCronJob(
     // Jun-2026 silent cron outage (a moved Claude binary ENOENT'd ~400 fires,
     // every one logged "completed in 16ms"). Treat a non-budget session error as
     // a cron failure: record it and fire an ops-alert.
-    const sessionErrored = !budgetStopped && finalSession?.status === "error";
+    // A session killed by the wall-clock cap (sessions.maxDurationMinutes) is
+    // ALSO not a success: the manager used to flatten it to status:"idle" with a
+    // null lastError, so it landed here as "success"/no-alert — 75 runs across
+    // ~20 jobs went dark that way, including this steward's own monthly audit
+    // failing 2/2 months while run-history read "success". The manager now
+    // preserves status:"interrupted" + the SESSION_TIMEOUT_PREFIX sentinel;
+    // classify it as a distinct failure so the reason survives into the run-log.
+    const timedOut = !budgetStopped && !!finalSession?.lastError?.startsWith(SESSION_TIMEOUT_PREFIX);
+    const sessionErrored = !budgetStopped && !timedOut && finalSession?.status === "error";
     appendRunLog(job.id, {
       timestamp: startedAt,
       sessionKey,
       sessionId: routeResult?.sessionId ?? null,
-      status: budgetStopped ? "session_budget_stop" : sessionErrored ? "error" : "success",
+      status: budgetStopped
+        ? "session_budget_stop"
+        : timedOut
+          ? "session_timeout"
+          : sessionErrored
+            ? "error"
+            : "success",
       durationMs,
       error: budgetStopped
         ? finalSession?.lastError ?? null
-        : sessionErrored
-          ? finalSession?.lastError ?? "session ended in error"
-          : null,
+        : timedOut
+          ? finalSession?.lastError ?? "session hit the wall-clock timeout"
+          : sessionErrored
+            ? finalSession?.lastError ?? "session ended in error"
+            : null,
       ...(budgetStopped ? { maxTurns: budget.maxTurns, actualTurns: finalSession?.totalTurns ?? null } : {}),
+      ...(timedOut ? { actualTurns: finalSession?.totalTurns ?? null } : {}),
       ...catchUpFields,
       resultPreview: null,
     });
@@ -196,7 +214,19 @@ export async function runCronJob(
         `after ~${finalSession?.totalTurns ?? "?"} turns. This job is flagged sideEffects:true — check for partial external writes.`,
       ).catch(() => {});
     }
-    if (sessionErrored) {
+    if (timedOut) {
+      logger.error(
+        `Cron job "${job.name}" (${job.id}) hit the session wall-clock timeout after ${durationMs}ms: ${finalSession?.lastError ?? "(no message)"}`,
+      );
+      await opsAlert(
+        `Cron "${job.name}" (${job.id}) FAILED — killed by the session wall-clock cap after ` +
+          `${(durationMs / 60_000).toFixed(1)}min (~${finalSession?.totalTurns ?? "?"} turns). No reply was delivered. ` +
+          `${finalSession?.lastError?.slice(0, 200) ?? ""}` +
+          (budget.sideEffects
+            ? " This job is flagged sideEffects:true — check for partial external writes."
+            : " Raise sessions.maxDurationMinutes or trim the job's scope."),
+      ).catch(() => {});
+    } else if (sessionErrored) {
       logger.error(
         `Cron job "${job.name}" (${job.id}) session ended in error in ${durationMs}ms: ${finalSession?.lastError ?? "(no message)"}`,
       );
@@ -208,9 +238,11 @@ export async function runCronJob(
       logger.info(`Cron job "${job.name}" ${budgetStopped ? "stopped at turn budget" : "completed"} in ${durationMs}ms`);
     }
 
-    // Latency alert: warn if job exceeded threshold
+    // Latency alert: warn if job exceeded threshold. Skipped on a timeout — a
+    // wall-clock kill always blows past the latency threshold, and the failure
+    // alert above already carries the duration; a 🐢 on top is pure noise.
     const thresholdMs = config.cron?.alertThresholdMs;
-    if (thresholdMs && durationMs > thresholdMs) {
+    if (thresholdMs && durationMs > thresholdMs && !timedOut) {
       const alertConnector = config.cron?.alertConnector;
       const alertChannel = config.cron?.alertChannel;
       if (alertConnector && alertChannel) {

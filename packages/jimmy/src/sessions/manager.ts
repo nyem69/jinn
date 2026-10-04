@@ -10,7 +10,7 @@ import type {
   Target,
 } from "../shared/types.js";
 import { modelFor } from "../shared/types.js";
-import { startSessionTimeout } from "../shared/timeout.js";
+import { startSessionTimeout, sessionTimeoutReason, SESSION_TIMEOUT_PREFIX } from "../shared/timeout.js";
 import {
   accumulateSessionCost,
   logSessionCost,
@@ -378,7 +378,9 @@ export class SessionManager {
         source: session.source,
         onForceInterrupt: () => updateSession(session.id, {
           status: "interrupted",
-          lastError: `Session timeout (${timeoutMinutes}m) — engine never started`,
+          // Same sentinel prefix as the live-engine kill, so the cron runner
+          // classifies both timeout shapes identically.
+          lastError: `${sessionTimeoutReason(Number(timeoutMinutes))} — engine never started`,
         }),
       });
 
@@ -505,6 +507,11 @@ export class SessionManager {
       }
 
       const wasInterrupted = result.error?.startsWith("Interrupted");
+      // A wall-clock timeout kill is NOT a benign interrupt. "Interrupted by
+      // user"/"new message received" are expected and must stay silent, but the
+      // maxDurationMinutes kill means the task died mid-flight — it has to
+      // survive into the session row so the cron runner can classify the run.
+      const timedOut = !!result.error?.startsWith(SESSION_TIMEOUT_PREFIX);
 
       // Dead session detection: if the engine session ID is stale (expired/invalid),
       // clear cached engine sessions from transportMeta so the next attempt starts fresh.
@@ -935,7 +942,7 @@ export class SessionManager {
       }
       const updatedSession = updateSession(session.id, {
         ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
-        status: wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
+        status: timedOut ? "interrupted" : wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
         replyContext: msg.replyContext,
         messageId: msg.messageId ?? null,
         transportMeta: (() => {
@@ -946,10 +953,10 @@ export class SessionManager {
           return merged as any;
         })(),
         lastActivity: new Date().toISOString(),
-        lastError: wasInterrupted ? null : (result.error ?? null),
+        lastError: timedOut ? (result.error ?? null) : (wasInterrupted ? null : (result.error ?? null)),
       });
       if (updatedSession) {
-        notifyParentSession(updatedSession, { result: result.result, error: wasInterrupted ? null : (result.error ?? null), cost: result.cost, durationMs: result.durationMs }, { alwaysNotify: employee?.alwaysNotify });
+        notifyParentSession(updatedSession, { result: result.result, error: (timedOut || !wasInterrupted) ? (result.error ?? null) : null, cost: result.cost, durationMs: result.durationMs }, { alwaysNotify: employee?.alwaysNotify });
       }
 
       logger.info(

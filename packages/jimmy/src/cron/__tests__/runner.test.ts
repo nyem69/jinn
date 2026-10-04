@@ -340,3 +340,134 @@ describe("runCronJob — session ended in error without route() throwing", () =>
     expect(opsAlert).not.toHaveBeenCalled();
   });
 });
+
+describe("runCronJob — session killed by the wall-clock timeout", () => {
+  // Regression for the Aug-2026 steward finding: sessions.maxDurationMinutes
+  // killed the engine, the manager flattened the kill to status:"idle" +
+  // lastError:null, and the runner logged {"status":"success","error":null}
+  // with no delivery and no alert. 75 runs across ~20 jobs went dark that way —
+  // including the system-steward audit itself, which failed 2/2 months while
+  // its run history read "success" both times.
+  beforeEach(async () => {
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { appendRunLog } = await import("../jobs.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    (opsAlert as any).mockReset().mockResolvedValue(undefined);
+    (appendRunLog as any).mockClear();
+    (getSession as any).mockReset().mockReturnValue(undefined);
+  });
+
+  const timedOutSession = (overrides = {}) => ({
+    status: "interrupted",
+    lastError: "Interrupted: session timeout (45m)",
+    totalTurns: 137,
+    ...overrides,
+  });
+
+  it("logs status 'session_timeout' carrying the reason, not 'success'", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    (getSession as any).mockReturnValue(timedOutSession());
+
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(makeJob(), sessionManager, makeConfig(), connectors);
+
+    expect(appendRunLog).toHaveBeenCalledWith(
+      "test-job",
+      expect.objectContaining({
+        status: "session_timeout",
+        error: "Interrupted: session timeout (45m)",
+        actualTurns: 137,
+      }),
+    );
+  });
+
+  it("fires an ops-alert naming the timeout", async () => {
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    (getSession as any).mockReturnValue(timedOutSession());
+
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(makeJob(), sessionManager, makeConfig(), connectors);
+
+    expect(opsAlert).toHaveBeenCalledTimes(1);
+    const msg = (opsAlert as any).mock.calls[0][0];
+    expect(msg).toContain("FAILED");
+    expect(msg).toMatch(/wall-clock/i);
+  });
+
+  it("warns about partial writes when the job is flagged sideEffects", async () => {
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    (getSession as any).mockReturnValue(timedOutSession());
+
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(
+      makeJob({ sessionBudget: { sideEffects: true } }),
+      sessionManager,
+      makeConfig(),
+      connectors,
+    );
+
+    expect((opsAlert as any).mock.calls[0][0]).toContain("partial external writes");
+  });
+
+  it("does NOT also fire the latency alert (single alert, no 🐢 on top)", async () => {
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    (getSession as any).mockReturnValue(timedOutSession());
+
+    const connector = makeMockConnector();
+    const connectors = new Map<string, Connector>([["slack", connector]]);
+    // 200ms run against a 100ms threshold would normally trip the latency alert
+    const sessionManager = makeMockSessionManager(200);
+
+    await runCronJob(makeJob(), sessionManager, makeConfig({ alertThresholdMs: 100 }), connectors);
+
+    expect(opsAlert).toHaveBeenCalledTimes(1);
+    expect(connector.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("catches the engine-never-started timeout shape too", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    (getSession as any).mockReturnValue(
+      timedOutSession({ lastError: "Interrupted: session timeout (45m) — engine never started" }),
+    );
+
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(makeJob(), sessionManager, makeConfig(), connectors);
+
+    expect(appendRunLog).toHaveBeenCalledWith(
+      "test-job",
+      expect.objectContaining({ status: "session_timeout" }),
+    );
+  });
+
+  it("does NOT classify a benign user interrupt as a timeout", async () => {
+    const { appendRunLog } = await import("../jobs.js");
+    const { opsAlert } = await import("../../shared/ops-alert.js");
+    const { getSession } = await import("../../sessions/registry.js");
+    // "Interrupted by user" / "new message received" stay silent successes
+    (getSession as any).mockReturnValue({ status: "idle", lastError: null, totalTurns: 4 });
+
+    const sessionManager = makeMockSessionManager(0);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+
+    await runCronJob(makeJob(), sessionManager, makeConfig(), connectors);
+
+    expect(appendRunLog).toHaveBeenCalledWith(
+      "test-job",
+      expect.objectContaining({ status: "success" }),
+    );
+    expect(opsAlert).not.toHaveBeenCalled();
+  });
+});

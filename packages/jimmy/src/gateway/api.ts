@@ -6,7 +6,7 @@ import path from "node:path";
 import yaml from "js-yaml";
 import type { CronJob, Engine, IncomingMessage, JinnConfig, Session, Target } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
-import { startSessionTimeout } from "../shared/timeout.js";
+import { startSessionTimeout, SESSION_TIMEOUT_PREFIX } from "../shared/timeout.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { buildContext } from "../sessions/context.js";
 import {
@@ -2541,6 +2541,9 @@ async function runWebSession(
     }
 
     const wasInterrupted = result.error?.startsWith("Interrupted");
+    // Same carve-out as SessionManager.runSession: a wall-clock timeout kill is
+    // not a benign interrupt and must not be flattened to a clean idle row.
+    const timedOut = !!result.error?.startsWith(SESSION_TIMEOUT_PREFIX);
     const rateLimit = !wasInterrupted ? detectRateLimit(result) : { limited: false as const };
 
     if (rateLimit.limited) {
@@ -2835,9 +2838,9 @@ async function runWebSession(
 
     const completedSession = updateSession(currentSession.id, {
       ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
-      status: wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
+      status: timedOut ? "interrupted" : wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
       lastActivity: new Date().toISOString(),
-      lastError: wasInterrupted ? null : (result.error ?? null),
+      lastError: timedOut ? (result.error ?? null) : (wasInterrupted ? null : (result.error ?? null)),
     });
     if (result.cost || result.numTurns) {
       try {
