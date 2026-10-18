@@ -31,6 +31,8 @@ export const AGENTS_SKILLS_DIR = path.join(JINN_HOME, ".agents", "skills");
 export const TEMPLATE_DIR = path.join(__dirname, "..", "..", "..", "template");
 export const FILES_DIR = path.join(JINN_HOME, "files");
 export const MIGRATIONS_DIR = path.join(JINN_HOME, "migrations");
+/** Globs (one per line) naming root-class (T0) secrets that must never reach a session env. */
+export const T0_NAMES_FILE = path.join(JINN_HOME, "config", "t0-names.txt");
 export const TEMPLATE_MIGRATIONS_DIR = path.join(TEMPLATE_DIR, "migrations");
 
 /** Path to the global instances registry (always in default ~/.jinn/) */

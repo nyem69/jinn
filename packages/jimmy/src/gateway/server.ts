@@ -24,6 +24,7 @@ import { RemoteDiscordConnector } from "../connectors/discord/remote.js";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { TelegramConnector } from "../connectors/telegram/index.js";
 import { loadJobsForBoot } from "../cron/jobs.js";
+import { checkT0AtBoot } from "../shared/cleanEnv.js";
 import { startScheduler, reloadSchedulerFromFile, stopScheduler } from "../cron/scheduler.js";
 import { startCronReconciler, stopCronReconciler } from "../cron/reconciler.js";
 import { scanOrg } from "./org.js";
@@ -130,6 +131,11 @@ export async function startGateway(
   if (recoveredQueue > 0) {
     logger.info(`Recovered ${recoveredQueue} in-flight queue item(s) from previous run — reset to pending`);
   }
+
+  // R9 #4: root-class (T0) names must not be in the gateway env at all, and the
+  // strip that keeps them out of session envs must be on. Names only; one
+  // opsAlert per boot; never blocks start-up.
+  void checkT0AtBoot();
 
   // Set up engines
   const claudeEngine = new ClaudeEngine();

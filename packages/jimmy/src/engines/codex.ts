@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
+import { buildCleanEnv, excludeClaudeCodeAndCodex } from "../shared/cleanEnv.js";
 
 interface LiveProcess {
   proc: ChildProcess;
@@ -55,7 +56,7 @@ export class CodexEngine implements InterruptibleEngine {
       `Codex engine starting: ${bin} ${args[0]}${isResume ? " resume" : ""} --model ${opts.model || "default"} (resume: ${opts.resumeSessionId || "none"})`,
     );
 
-    const cleanEnv = this.buildCleanEnv();
+    const cleanEnv = buildCleanEnv(excludeClaudeCodeAndCodex);
 
     return new Promise((resolve, reject) => {
       const proc = spawn(bin, args, {
@@ -363,16 +364,6 @@ export class CodexEngine implements InterruptibleEngine {
     }
 
     return null;
-  }
-
-  private buildCleanEnv(): Record<string, string> {
-    const cleanEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
-      if (k === "CODEX" || k.startsWith("CODEX_")) continue;
-      if (v !== undefined) cleanEnv[k] = v;
-    }
-    return cleanEnv;
   }
 
   private signalProcess(proc: ChildProcess, signal: NodeJS.Signals): void {
