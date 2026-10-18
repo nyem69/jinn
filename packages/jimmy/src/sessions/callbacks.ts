@@ -1,4 +1,5 @@
 import { getSession } from "./registry.js";
+import { isStoppedAfterWork } from "./budget.js";
 import { loadConfig } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
 import type { Session } from "../shared/types.js";
@@ -61,7 +62,10 @@ async function _sendNotification(
 ): Promise<void> {
   const parent = getSession(childSession.parentSessionId!);
   if (!parent) return; // Parent gone or expired
-  if (parent.status === "error") return; // Parent already in error — skip
+  // Parent already in error — skip. Exception: a cron root stopped at the
+  // Claude limit still gets the message; POST /message records it (UI + transcript)
+  // without dispatching a turn.
+  if (parent.status === "error" && !isStoppedAfterWork(parent)) return;
 
   const employeeName = childSession.employee || "Unknown";
   const childId = childSession.id;

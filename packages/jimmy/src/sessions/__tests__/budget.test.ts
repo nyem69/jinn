@@ -66,3 +66,23 @@ describe("constants", () => {
     expect(SESSION_BUDGET_STOP_PREFIX).toBe("session_budget_stop:");
   });
 });
+
+describe("limitAfterWorkMessage", () => {
+  it("writes the sentinel the cron runner surfaces in its ops alert", async () => {
+    const { limitAfterWorkMessage, LIMIT_AFTER_WORK_PREFIX } = await import("../budget.js");
+    const msg = limitAfterWorkMessage("usage limit", 7, 0.4321);
+    expect(msg.startsWith(LIMIT_AFTER_WORK_PREFIX)).toBe(true);
+    expect(msg).toContain("usage limit");
+    expect(msg).toContain("turns=7");
+    expect(msg).toContain("cost=$0.43");
+  });
+});
+
+describe("isStoppedAfterWork", () => {
+  it("matches only an error row carrying the limit-after-work sentinel", async () => {
+    const { isStoppedAfterWork, limitAfterWorkMessage } = await import("../budget.js");
+    expect(isStoppedAfterWork({ status: "error", lastError: limitAfterWorkMessage("usage limit", 3, 0.1) })).toBe(true);
+    expect(isStoppedAfterWork({ status: "error", lastError: "boom" })).toBe(false);
+    expect(isStoppedAfterWork({ status: "idle", lastError: limitAfterWorkMessage("usage limit") })).toBe(false);
+  });
+});

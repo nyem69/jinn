@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { EngineResult } from "../types.js";
-import { isDeadSessionError, detectRateLimit } from "../rateLimit.js";
+import { isDeadSessionError, detectRateLimit, engineDidWork, rateLimitKind } from "../rateLimit.js";
 
 function makeResult(overrides: Partial<EngineResult> = {}): EngineResult {
   return {
@@ -118,5 +118,33 @@ describe("isDeadSessionError", () => {
     });
     expect(detectRateLimit(rateLimited).limited).toBe(true);
     expect(isDeadSessionError(rateLimited)).toBe(false);
+  });
+});
+
+describe("engineDidWork", () => {
+  it("is false for a first-request usage-limit rejection", () => {
+    expect(engineDidWork(makeResult({ error: "You've hit your session limit", cost: 0, numTurns: 1 }))).toBe(false);
+    expect(engineDidWork(makeResult({ error: "Claude exited with code 1" }))).toBe(false);
+  });
+
+  it("is true once the run spent money or took a second turn", () => {
+    expect(engineDidWork(makeResult({ cost: 0.42, numTurns: 1 }))).toBe(true);
+    expect(engineDidWork(makeResult({ cost: 0, numTurns: 3 }))).toBe(true);
+  });
+});
+
+describe("rateLimitKind", () => {
+  it("separates a real usage limit from a transient 429/overload", () => {
+    expect(rateLimitKind(makeResult({ error: "You've hit your session limit · resets 9:50pm" }))).toBe("usage limit");
+    expect(rateLimitKind(makeResult({ error: "x", rateLimit: { status: "rejected" } }))).toBe("usage limit");
+    expect(rateLimitKind(makeResult({ error: "API Error: 529 overloaded_error" }))).toBe("rate limit/overload");
+    expect(rateLimitKind(makeResult({ error: "429 Too Many Requests" }))).toBe("rate limit/overload");
+  });
+});
+
+describe("detectRateLimit — Claude CLI 5-hour session limit text", () => {
+  it("treats the bare quota-exit text as a usage limit", () => {
+    expect(detectRateLimit(makeResult({ error: "You've hit your session limit · resets 9:50pm" })).limited).toBe(true);
+    expect(detectRateLimit(makeResult({ error: "session not found" })).limited).toBe(false);
   });
 });
