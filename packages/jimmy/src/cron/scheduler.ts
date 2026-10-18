@@ -8,7 +8,7 @@ import type {
 import { runCronJob, lastStartedAtMs } from "./runner.js";
 import { logger } from "../shared/logger.js";
 import type { SessionManager } from "../sessions/manager.js";
-import { loadJobs, saveJobs } from "./jobs.js";
+import { loadJobs, loadJobsResult, saveJobs, JobsFileInvalidError } from "./jobs.js";
 import {
   computeMissedFires,
   checkpointFloor,
@@ -155,6 +155,23 @@ export function reloadScheduler(jobs: CronJob[]): void {
   scheduleJobs(jobs);
 }
 
+/**
+ * File-watcher path: reschedule from jobs.json, or keep the live schedule when
+ * the file is invalid. Often a writer mid-save, whose next event reloads; a
+ * file that stays bad is paged once by loadJobsResult.
+ */
+export function reloadSchedulerFromFile(): { ok: true; count: number } | { ok: false } {
+  const loaded = loadJobsResult();
+  if (!loaded.ok) {
+    logger.error(
+      `Cron reload skipped: jobs.json is invalid (${loaded.reason}: ${loaded.detail}); keeping the live schedule`,
+    );
+    return { ok: false };
+  }
+  reloadScheduler(loaded.jobs);
+  return { ok: true, count: loaded.jobs.length };
+}
+
 export function stopScheduler(): void {
   for (const task of tasks) {
     task.stop();
@@ -191,8 +208,14 @@ export async function triggerCronJob(idOrName: string): Promise<CronJob | undefi
   return job;
 }
 
+/**
+ * Throws JobsFileInvalidError while jobs.json is invalid: the write must be
+ * based on a fresh good read, never on the last-good copy.
+ */
 export function setCronJobEnabled(idOrName: string, enabled: boolean): CronJob | undefined {
-  const jobs = loadJobs();
+  const loaded = loadJobsResult();
+  if (!loaded.ok) throw new JobsFileInvalidError(loaded);
+  const jobs = loaded.jobs;
   const index = jobs.findIndex((job) => matchesJob(job, idOrName));
   if (index === -1) return undefined;
   jobs[index] = { ...jobs[index], enabled };

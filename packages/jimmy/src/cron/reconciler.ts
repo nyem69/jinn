@@ -1,5 +1,5 @@
 import { logger } from "../shared/logger.js";
-import { loadJobs } from "./jobs.js";
+import { loadJobsResult } from "./jobs.js";
 import {
   reloadScheduler,
   getScheduledSignature,
@@ -49,10 +49,20 @@ export function stopCronReconciler(): void {
  */
 export function tickReconciler(): boolean {
   try {
-    const jobs = loadJobs();
+    const loaded = loadJobsResult();
+    let reloaded = false;
+    if (!loaded.ok) {
+      // Keep the live schedule. loadJobsResult already logged the first
+      // sighting and owns the (once per bad file) ops alert.
+      logger.warn(
+        `Cron reconciler: jobs.json is invalid (${loaded.reason}: ${loaded.detail}); keeping the live schedule`,
+      );
+      void catchUpMissed();
+      return false;
+    }
+    const jobs = loaded.jobs;
     const persisted = signatureOfJobs(jobs);
     const live = getScheduledSignature();
-    let reloaded = false;
     if (persisted !== live) {
       logger.warn(
         `Cron reconciler: persisted jobs.json diverges from live scheduler ` +

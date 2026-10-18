@@ -2,6 +2,7 @@ import fs from "node:fs";
 import type {
   BuiltInEngineName,
   Connector,
+  CronJob,
   Employee,
   Engine,
   IncomingMessage,
@@ -31,7 +32,7 @@ import { resolveEffort } from "../shared/effort.js";
 import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit, engineDidWork, isDeadSessionError, rateLimitKind } from "../shared/rateLimit.js";
 import { resolveEngineModel } from "../shared/engineModel.js";
 import { getClaudeExpectedResetAt, isLikelyNearClaudeUsageLimit, recordClaudeRateLimit } from "../shared/usageAwareness.js";
-import { loadJobs } from "../cron/jobs.js";
+import { loadJobs, JobsFileInvalidError } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
 import { checkBudget } from "../gateway/budgets.js";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../mcp/resolver.js";
@@ -1181,7 +1182,17 @@ export class SessionManager {
         await connector.replyMessage(target, `Usage: /cron ${subcommand} <job-id-or-name>`);
         return true;
       }
-      const job = setCronJobEnabled(arg, subcommand === "enable");
+      let job: CronJob | undefined;
+      try {
+        job = setCronJobEnabled(arg, subcommand === "enable");
+      } catch (err) {
+        if (!(err instanceof JobsFileInvalidError)) throw err;
+        await connector.replyMessage(
+          target,
+          `Not changed: cron/jobs.json is invalid (${err.failure.reason}: ${err.failure.detail}). Fix the file first.`,
+        );
+        return true;
+      }
       await connector.replyMessage(
         target,
         job

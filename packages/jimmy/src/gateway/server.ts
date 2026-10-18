@@ -23,8 +23,8 @@ import { DiscordConnector, type DiscordConnectorConfig } from "../connectors/dis
 import { RemoteDiscordConnector } from "../connectors/discord/remote.js";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { TelegramConnector } from "../connectors/telegram/index.js";
-import { loadJobs } from "../cron/jobs.js";
-import { startScheduler, reloadScheduler, stopScheduler } from "../cron/scheduler.js";
+import { loadJobsForBoot } from "../cron/jobs.js";
+import { startScheduler, reloadSchedulerFromFile, stopScheduler } from "../cron/scheduler.js";
 import { startCronReconciler, stopCronReconciler } from "../cron/reconciler.js";
 import { scanOrg } from "./org.js";
 
@@ -583,7 +583,9 @@ export async function startGateway(
   }
 
   // Start cron scheduler
-  const cronJobs = loadJobs();
+  // An invalid jobs.json falls back to cron/jobs.lastgood.json (logged and
+  // paged inside loadJobsForBoot) — never a silent empty schedule.
+  const { jobs: cronJobs } = loadJobsForBoot();
   startScheduler(cronJobs, sessionManager, config, connectorMap);
   // Belt-and-suspenders for the file-watcher path: periodically diff the
   // persisted jobs.json signature against the live scheduler and force a
@@ -727,9 +729,10 @@ export async function startGateway(
       }
     },
     onCronReload: () => {
-      const updatedJobs = loadJobs();
-      reloadScheduler(updatedJobs);
-      logger.info(`Cron jobs reloaded (${updatedJobs.length} job(s))`);
+      // An invalid jobs.json keeps the live schedule (logged inside).
+      const reloaded = reloadSchedulerFromFile();
+      if (!reloaded.ok) return;
+      logger.info(`Cron jobs reloaded (${reloaded.count} job(s))`);
       emit("cron:reloaded", {});
     },
     onOrgChange: () => {
