@@ -6,7 +6,9 @@ import { T0_NAMES_FILE } from "./paths.js";
 /**
  * One env builder for every child the gateway starts on a session's behalf:
  * the engine CLIs (claude / codex / gemini), cron prechecks, session forks,
- * shell hooks and the HTTP engines' runCommand tool.
+ * shell hooks, the HTTP engines' runCommand tool and the MCP tools/list
+ * probe (the same server code a session then runs). mcp/resolver.ts also
+ * refuses to interpolate a T0 name into a session's MCP config (isT0Name).
  *
  * Two layers:
  *   1. The caller's own exclusions (CLAUDECODE / CLAUDE_CODE_* so a nested CLI
@@ -20,9 +22,15 @@ import { T0_NAMES_FILE } from "./paths.js";
  * visible instead: one warning per state change here, and one opsAlert at boot
  * (checkT0AtBoot).
  *
- * The file is re-read when its mtime/size changes (one statSync per spawn,
- * microseconds against a CLI start-up of seconds), so widening the globs does
- * not need a gateway restart; restarts are operator-timed.
+ * The file is re-read when its mtime/ctime/size changes (one statSync per
+ * spawn, microseconds against a CLI start-up of seconds), so widening the
+ * globs does not need a gateway restart; restarts are operator-timed. ctime is
+ * in the key so a chmod that makes an unreadable file readable is picked up.
+ *
+ * Matching is a linear segment scan, not a RegExp: `.*` per star backtracks
+ * polynomially in the number of stars, and every env name is tested against
+ * every glob on every spawn, synchronously, so one many-star line could stall
+ * the event loop.
  *
  * Known ceiling: jobs and prechecks that source secrets/root.env by design
  * (replica-136-lag, fama-stall-watch) put T0 into a child of the session after
@@ -30,8 +38,10 @@ import { T0_NAMES_FILE } from "./paths.js";
  * fence (R9 #5, after 25 Nov) is what keeps root.env itself out of reach.
  */
 
+type NameMatcher = (name: string) => boolean;
+
 type T0State =
-  | { ok: true; globs: string[]; matchers: RegExp[] }
+  | { ok: true; globs: string[]; matchers: NameMatcher[] }
   | { ok: false; reason: string };
 
 /** A glob line may hold only env-name characters and `*` — never a value. */
@@ -41,13 +51,30 @@ let t0File = T0_NAMES_FILE;
 let cache: { key: string; state: T0State } | null = null;
 let lastReported: string | null = null;
 
-/** Anchored, case-sensitive matcher where `*` is the only wildcard (any run, incl. empty). */
-export function globToRegExp(glob: string): RegExp {
-  const body = glob
-    .split("*")
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  return new RegExp(`^${body}$`);
+/**
+ * Anchored, case-sensitive matcher where `*` is the only wildcard (any run,
+ * incl. empty). Prefix and suffix must match exactly; each middle segment is
+ * placed at its leftmost occurrence after the previous one, which is optimal
+ * for `*`-only globs, so a name is scanned once per glob with no backtracking.
+ */
+export function compileGlob(glob: string): NameMatcher {
+  const parts = glob.split("*");
+  if (parts.length === 1) return (name) => name === glob;
+  const head = parts[0];
+  const tail = parts[parts.length - 1];
+  const mids = parts.slice(1, -1).filter((p) => p !== "");
+  return (name) => {
+    if (name.length < head.length + tail.length) return false;
+    if (!name.startsWith(head) || !name.endsWith(tail)) return false;
+    const end = name.length - tail.length;
+    let pos = head.length;
+    for (const mid of mids) {
+      const i = name.indexOf(mid, pos);
+      if (i === -1 || i + mid.length > end) return false;
+      pos = i + mid.length;
+    }
+    return true;
+  };
 }
 
 function parseGlobs(text: string): { globs: string[]; badLines: number[] } {
@@ -70,7 +97,7 @@ function loadState(): T0State {
   let key: string;
   try {
     const st = fs.statSync(t0File);
-    key = `${st.mtimeMs}:${st.size}`;
+    key = `${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? "stat failed";
     key = `missing:${code}`;
@@ -88,7 +115,7 @@ function loadState(): T0State {
         logger.warn(`T0 env guard: ignored malformed line(s) ${badLines.join(", ")} in ${t0File} (globs only: A-Z 0-9 _ *)`);
       }
       state = globs.length > 0
-        ? { ok: true, globs, matchers: globs.map(globToRegExp) }
+        ? { ok: true, globs, matchers: globs.map(compileGlob) }
         : { ok: false, reason: `${t0File} holds no globs` };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
@@ -111,8 +138,14 @@ export function t0MatchingNames(env: NodeJS.ProcessEnv = process.env): string[] 
   const state = loadState();
   if (!state.ok) return [];
   return Object.keys(env)
-    .filter((k) => state.matchers.some((re) => re.test(k)))
+    .filter((k) => state.matchers.some((m) => m(k)))
     .sort();
+}
+
+/** True when `name` matches a T0 glob; false when it does not or the guard is off. */
+export function isT0Name(name: string): boolean {
+  const state = loadState();
+  return state.ok && state.matchers.some((m) => m(name));
 }
 
 /** Claude Code's own session markers. */
@@ -136,7 +169,7 @@ export function buildCleanEnv(
   const cleanEnv: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
     if (exclude?.(k)) continue;
-    if (matchers.some((re) => re.test(k))) continue;
+    if (matchers.some((m) => m(k))) continue;
     if (v !== undefined) cleanEnv[k] = v;
   }
   return cleanEnv;

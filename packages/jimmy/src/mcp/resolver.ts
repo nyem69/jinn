@@ -4,6 +4,7 @@ import os from "node:os";
 import type { McpGlobalConfig, McpServerConfig, McpServerUrlConfig, Employee } from "../shared/types.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
+import { isT0Name } from "../shared/cleanEnv.js";
 
 export interface ResolvedMcpConfig {
   mcpServers: Record<string, McpServerConfig>;
@@ -172,16 +173,19 @@ export function cleanupMcpConfigFile(sessionId: string): void {
 /**
  * Resolve a value that may reference an environment variable.
  * Supports ${VAR_NAME} syntax.
+ *
+ * A root-class (T0) name is never interpolated: the resolved config is written
+ * to JINN_HOME/tmp/mcp/<sessionId>.json, which the session can read, and its
+ * values become the MCP child's env — a bypass of the session env strip (R9 #4).
  */
 function resolveEnvVar(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const match = value.match(/^\$\{(.+)\}$/);
-  if (match) {
-    return process.env[match[1]] || undefined;
+  const name = match ? match[1] : value.startsWith("$") ? value.slice(1) : null;
+  if (name === null) return value;
+  if (isT0Name(name)) {
+    logger.warn(`MCP config references root-class (T0) name ${name}; not resolved into a session-visible config`);
+    return undefined;
   }
-  // Also check if the raw value is a plain env var name
-  if (value.startsWith("$")) {
-    return process.env[value.slice(1)] || undefined;
-  }
-  return value;
+  return process.env[name] || undefined;
 }

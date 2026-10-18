@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { McpServerConfig } from "../shared/types.js";
+import { buildCleanEnv } from "../shared/cleanEnv.js";
 
 export interface ProbedTool {
   name: string;
@@ -49,7 +50,9 @@ async function probeStdio(server: Extract<McpServerConfig, { command: string }>,
         resolve(r);
       }
     };
-    const proc = spawn(server.command, server.args ?? [], { env: { ...process.env, ...(server.env ?? {}) } });
+    // Same server code the session runs, so the same env strip: minus T0 names (R9 #4).
+    // The server's own configured env still goes on top.
+    const proc = spawn(server.command, server.args ?? [], { env: { ...buildCleanEnv(), ...(server.env ?? {}) } });
     let out = "";
     const timer = setTimeout(() => finish({ tools: null, error: "timeout" }), timeoutMs);
     proc.stdout.on("data", (b) => {

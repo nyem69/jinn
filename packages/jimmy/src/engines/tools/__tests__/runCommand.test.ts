@@ -5,6 +5,7 @@ import os from "node:os";
 import { runCommandTool } from "../runCommand.js";
 import type { ToolExecutionContext } from "../types.js";
 import type { JsonObject, JsonValue } from "../../../shared/types.js";
+import { setT0NamesFileForTests } from "../../../shared/cleanEnv.js";
 
 let jail: string;
 let ctx: ToolExecutionContext;
@@ -414,5 +415,38 @@ describe("runCommand: bad arg shapes", () => {
     );
     expect(r.ok).toBe(false);
     expect(r.audit.error).toBe("bad_args");
+  });
+});
+
+// ─── Env: root-class (T0) names stripped (R9 #4) ─────────────────────
+
+describe("runCommand: child env", () => {
+  let saved: NodeJS.ProcessEnv;
+  beforeEach(async () => {
+    saved = { ...process.env };
+    const globs = path.join(jail, "t0-names.txt");
+    await fs.writeFile(globs, "*_SSH_PASSWORD\n*SUDO*PASSWORD*\n");
+    setT0NamesFileForTests(globs);
+    // Planted fakes only.
+    process.env.FAKE_X_SSH_PASSWORD = "fake-ssh-value-111";
+    process.env.FAKE_BOX_SUDO_PASSWORD = "fake-sudo-value-222";
+    process.env.FAKE_KEEP_ME = "keep-333";
+  });
+  afterEach(() => {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+    setT0NamesFileForTests(null);
+  });
+
+  it("drops planted T0 names and keeps ordinary ones", async () => {
+    // `env` itself is never-listed; printenv prints the same NAME=value lines.
+    const r = await runCommandTool({ command: "printenv", args: [] }, withBashOpts({ allowlist: ["printenv"] }));
+    expect(r.audit.error ?? "none").toBe("none");
+    expect(r.ok).toBe(true);
+    // Names only in assertions: a failure must not print the developer's env values.
+    const names = new Set(String(r.content).split("\n").map((l) => l.split("=")[0]));
+    expect(names.has("FAKE_KEEP_ME")).toBe(true);
+    expect(names.has("FAKE_X_SSH_PASSWORD")).toBe(false);
+    expect(names.has("FAKE_BOX_SUDO_PASSWORD")).toBe(false);
   });
 });
