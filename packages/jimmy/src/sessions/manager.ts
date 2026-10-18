@@ -28,7 +28,8 @@ import { SessionQueue } from "./queue.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import { resolveEffort } from "../shared/effort.js";
-import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit, isDeadSessionError } from "../shared/rateLimit.js";
+import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit, engineDidWork, isDeadSessionError, rateLimitKind } from "../shared/rateLimit.js";
+import { resolveEngineModel } from "../shared/engineModel.js";
 import { getClaudeExpectedResetAt, isLikelyNearClaudeUsageLimit, recordClaudeRateLimit } from "../shared/usageAwareness.js";
 import { loadJobs } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
@@ -37,7 +38,7 @@ import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../
 import { validateServers } from "../mcp/validate.js";
 import { compactSession, resolveCompactionConfig } from "./compact.js";
 import { HookRunner } from "../hooks/index.js";
-import { isAutonomousSource, isBudgetStop, budgetContractPrompt, SESSION_BUDGET_STOP_PREFIX } from "./budget.js";
+import { isAutonomousSource, isBudgetStop, budgetContractPrompt, SESSION_BUDGET_STOP_PREFIX, limitAfterWorkMessage } from "./budget.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -355,7 +356,7 @@ export class SessionManager {
       // Heuristic preflight warning: Claude usage limits don't expose a precise "remaining" budget.
       // If we've hit the limit recently and this looks like a heavy turn, warn before we spend time.
       if (decorateMessages && session.engine === "claude" && isLikelyNearClaudeUsageLimit()) {
-        const modelName = (session.model ?? engineConfig.model ?? "").toLowerCase();
+        const modelName = (resolveEngineModel(session.engine, session.model, engineConfig.model) ?? "").toLowerCase();
         const heavyEffort = ["high", "xhigh", "max"].includes((effortLevel || "").toLowerCase());
         const heavyModel = modelName.includes("opus");
         const looksBig = attachments.length > 0 || msg.text.length > 6000;
@@ -389,7 +390,7 @@ export class SessionManager {
         const hookResult = await this.hookRunner.runPreSession({
           sessionId: session.id,
           engine: session.engine,
-          model: session.model ?? engineConfig.model,
+          model: resolveEngineModel(session.engine, session.model, engineConfig.model) ?? null,
           employee: employee?.name,
           prompt: promptToRun,
           systemPrompt,
@@ -455,13 +456,18 @@ export class SessionManager {
           }
         : undefined;
 
+      const runModel = resolveEngineModel(session.engine, session.model, engineConfig.model);
+      if (session.model && runModel !== session.model && !(session.transportMeta as Record<string, unknown> | null)?.["engineOverride"]) {
+        logger.warn(`Session ${session.id}: model "${session.model}" does not fit engine "${session.engine}" — using ${runModel ?? "the engine default"}`);
+      }
+
       const result = await engine.run({
         prompt: promptToRun,
         resumeSessionId: session.engineSessionId ?? undefined,
         systemPrompt,
         cwd: JINN_HOME,
         bin: engineConfig.bin,
-        model: session.model ?? engineConfig.model,
+        model: runModel,
         effortLevel,
         cliFlags: employee?.cliFlags,
         mcpConfigPath,
@@ -482,7 +488,7 @@ export class SessionManager {
         this.hookRunner?.firePostSession({
           sessionId: session.id,
           engine: session.engine,
-          model: session.model ?? engineConfig.model,
+          model: resolveEngineModel(session.engine, session.model, engineConfig.model) ?? null,
           employee: employee?.name,
           result: result.result,
           error: `${SESSION_BUDGET_STOP_PREFIX} hit max-turns cap (${budgetCap})`,
@@ -536,6 +542,49 @@ export class SessionManager {
       const rateLimit = (!wasInterrupted && !isDead) ? detectRateLimit(result) : { limited: false as const };
       if (rateLimit.limited) {
         recordClaudeRateLimit(rateLimit.resetsAt);
+        // The limited run's own usage, which the fallback/wait branches below never
+        // count. engineDidWork, not `cost || numTurns`: a rejected first request
+        // reports numTurns=1 and must not add a phantom turn.
+        if (engineDidWork(result)) {
+          accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
+        }
+
+        // Cron run that already did work: stop and alert (see LIMIT_AFTER_WORK_PREFIX).
+        // Ceiling: engineDidWork reads the CLI result event; a run killed with no
+        // result event reports no turns and still falls back.
+        if (isAutonomousSource(session.source) && engineDidWork(result)) {
+          const stopMsg = limitAfterWorkMessage(rateLimitKind(result), result.numTurns, result.cost);
+          logger.warn(`Session ${session.id}: ${stopMsg}`);
+          notifyDiscordChannel(`⚠️ ${stopMsg}. Session ${session.id}${session.employee ? ` (${session.employee})` : ""}.`);
+          this.hookRunner?.firePostSession({
+            sessionId: session.id,
+            engine: session.engine,
+            model: resolveEngineModel(session.engine, session.model, engineConfig.model) ?? null,
+            employee: employee?.name,
+            result: result.result,
+            error: stopMsg,
+            cost: result.cost,
+            durationMs: result.durationMs,
+            numTurns: result.numTurns,
+            timestamp: new Date().toISOString(),
+          });
+          if (decorateMessages && connector.setTypingStatus) {
+            await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
+          }
+          if (decorateMessages && capabilities.reactions) {
+            await connector.removeReaction(target, "eyes").catch(() => {});
+          }
+          const stopped = updateSession(session.id, {
+            ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
+            status: "error",
+            lastActivity: new Date().toISOString(),
+            lastError: stopMsg,
+          });
+          if (stopped) {
+            notifyParentSession(stopped, { result: result.result, error: stopMsg, cost: result.cost, durationMs: result.durationMs }, { alwaysNotify: employee?.alwaysNotify });
+          }
+          return;
+        }
 
         const strategy = this.config.sessions?.rateLimitStrategy ?? "fallback";
 
@@ -583,6 +632,7 @@ export class SessionManager {
             });
 
             const fallbackConfig = this.config.engines.codex;
+            const fallbackModel = resolveEngineModel(fallbackName, session.model, fallbackConfig.model);
             const fallbackEffort = resolveEffort(fallbackConfig, session, employee);
             const codexResume = typeof engineSessions.codex === "string" ? (engineSessions.codex as string) : undefined;
             const history = getMessages(session.id)
@@ -598,7 +648,7 @@ export class SessionManager {
               systemPrompt,
               cwd: JINN_HOME,
               bin: fallbackConfig.bin,
-              model: session.model ?? fallbackConfig.model,
+              model: fallbackModel,
               effortLevel: fallbackEffort,
               cliFlags: employee?.cliFlags,
               attachments: attachments.length > 0 ? attachments : undefined,
@@ -618,7 +668,7 @@ export class SessionManager {
                 logSessionCost({
                   sessionId: session.id,
                   engine: "codex",
-                  model: session.model ?? null,
+                  model: fallbackModel ?? null,
                   employee: employee?.name ?? null,
                   costUsd: fallbackResult.cost,
                 });
@@ -747,7 +797,7 @@ export class SessionManager {
               systemPrompt,
               cwd: JINN_HOME,
               bin: engineConfig.bin,
-              model: currentSession.model ?? engineConfig.model,
+              model: resolveEngineModel(session.engine, currentSession.model, engineConfig.model),
               effortLevel,
               cliFlags: employee?.cliFlags,
               mcpConfigPath,
@@ -823,7 +873,7 @@ export class SessionManager {
                 logSessionCost({
                   sessionId: session.id,
                   engine: session.engine,
-                  model: session.model ?? null,
+                  model: resolveEngineModel(session.engine, session.model, engineConfig.model) ?? null,
                   employee: employee?.name ?? null,
                   costUsd: retryResult.cost,
                 });
@@ -897,7 +947,7 @@ export class SessionManager {
           logSessionCost({
             sessionId: session.id,
             engine: session.engine,
-            model: session.model ?? engineConfig.model ?? null,
+            model: resolveEngineModel(session.engine, session.model, engineConfig.model) ?? null,
             employee: employee?.name ?? null,
             costUsd: result.cost,
           });
@@ -921,7 +971,7 @@ export class SessionManager {
       this.hookRunner?.firePostSession({
         sessionId: session.id,
         engine: session.engine,
-        model: session.model ?? engineConfig.model,
+        model: resolveEngineModel(session.engine, session.model, engineConfig.model) ?? null,
         employee: employee?.name,
         result: result.result,
         error: result.error,

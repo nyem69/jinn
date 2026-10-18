@@ -5,7 +5,7 @@ import { appendRunLog } from "./jobs.js";
 import { scanOrg, findEmployee } from "../gateway/org.js";
 import { CronConnector } from "../connectors/cron/index.js";
 import type { SessionManager } from "../sessions/manager.js";
-import { resolveJobBudget, SESSION_BUDGET_STOP_PREFIX } from "../sessions/budget.js";
+import { resolveJobBudget, SESSION_BUDGET_STOP_PREFIX, LIMIT_AFTER_WORK_PREFIX } from "../sessions/budget.js";
 import { getSession } from "../sessions/registry.js";
 import { SESSION_TIMEOUT_PREFIX } from "../shared/timeout.js";
 import { opsAlert } from "../shared/ops-alert.js";
@@ -230,9 +230,14 @@ export async function runCronJob(
       logger.error(
         `Cron job "${job.name}" (${job.id}) session ended in error in ${durationMs}ms: ${finalSession?.lastError ?? "(no message)"}`,
       );
+      const limitStopped = !!finalSession?.lastError?.startsWith(LIMIT_AFTER_WORK_PREFIX);
       await opsAlert(
-        `Cron "${job.name}" (${job.id}) FAILED — session ended in error (engine never produced a result, no exception thrown). ` +
-          `${finalSession?.lastError?.slice(0, 300) ?? "(no error message)"}`,
+        limitStopped
+          ? `Cron "${job.name}" (${job.id}) STOPPED — hit a Claude limit after ~${finalSession?.totalTurns ?? "?"} turns of work; ` +
+            `no Codex fallback, no retry, no reply delivered. ${finalSession?.lastError?.slice(0, 300) ?? ""}` +
+            (budget.sideEffects ? " This job is flagged sideEffects:true — check for partial external writes." : "")
+          : `Cron "${job.name}" (${job.id}) FAILED — session ended in error (engine never produced a result, no exception thrown). ` +
+            `${finalSession?.lastError?.slice(0, 300) ?? "(no error message)"}`,
       ).catch(() => {});
     } else {
       logger.info(`Cron job "${job.name}" ${budgetStopped ? "stopped at turn budget" : "completed"} in ${durationMs}ms`);

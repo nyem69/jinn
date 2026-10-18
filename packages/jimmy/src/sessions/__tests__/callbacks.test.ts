@@ -202,3 +202,37 @@ describe("notifyParentSession — alwaysNotify suppression", () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
   });
 });
+
+describe("notifyParentSession — parent stopped at the Claude limit", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    globalThis.fetch = originalFetch as typeof fetch;
+  });
+
+  it("still sends to a parent stopped after partial work (POST /message records it without dispatch)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    // makeSession() ignores its overrides argument, so spread them here.
+    vi.mocked(getSession).mockReturnValue({
+      ...makeSession(), id: "parent-001", parentSessionId: null, status: "error",
+      lastError: "Claude limit after partial work: usage limit (turns=4, cost=$0.30) — stopped",
+    } as Session);
+
+    notifyParentSession(makeSession(), { result: "child done" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).role).toBe("notification");
+  });
+
+  it("still drops notifications for a parent in any other error", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    vi.mocked(getSession).mockReturnValue({ ...makeSession(), id: "parent-001", parentSessionId: null, status: "error", lastError: "boom" } as Session);
+
+    notifyParentSession(makeSession(), { result: "child done" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

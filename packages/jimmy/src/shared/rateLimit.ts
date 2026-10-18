@@ -1,7 +1,7 @@
 import type { EngineResult } from "./types.js";
 
 const RATE_LIMIT_ERROR_RE =
-  /rate.?limit|too many requests|429|overloaded|usage.*limit|exceeded.*limit|out of extra usage/i;
+  /rate.?limit|too many requests|429|overloaded|usage.*limit|exceeded.*limit|out of extra usage|hit your session limit/i;
 
 export interface RateLimitDetection {
   limited: boolean;
@@ -77,3 +77,20 @@ export function computeNextRetryDelayMs(resetsAtSeconds?: number): { delayMs: nu
   return { delayMs: 60_000 };
 }
 
+
+/**
+ * Whether a run got past its first request before stopping: it spent money or
+ * took a second turn (a turn after a tool call). A usage-limit rejection on
+ * the very first request reports cost 0 and at most 1 turn.
+ */
+export function engineDidWork(result: EngineResult): boolean {
+  return (result.cost ?? 0) > 0 || (result.numTurns ?? 0) >= 2;
+}
+
+/** What kind of limit detectRateLimit matched: a real account usage limit, or a
+ *  transient 429/overload that RATE_LIMIT_ERROR_RE also catches. */
+export function rateLimitKind(result: EngineResult): "usage limit" | "rate limit/overload" {
+  if (result.rateLimit?.status === "rejected") return "usage limit";
+  if (result.error && /usage.*limit|hit your session limit|exceeded.*limit|out of extra usage/i.test(result.error)) return "usage limit";
+  return "rate limit/overload";
+}

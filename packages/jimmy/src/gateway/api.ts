@@ -61,6 +61,8 @@ import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLangua
 import { JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
 import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit } from "../shared/rateLimit.js";
+import { resolveEngineModel } from "../shared/engineModel.js";
+import { isStoppedAfterWork } from "../sessions/budget.js";
 import { getClaudeExpectedResetAt, recordClaudeRateLimit } from "../shared/usageAwareness.js";
 import { loadJobs, saveJobs } from "../cron/jobs.js";
 import { reloadScheduler } from "../cron/scheduler.js";
@@ -174,10 +176,19 @@ function dispatchWebSessionRun(
   engine: Engine,
   config: JinnConfig,
   context: ApiContext,
-  opts?: { delayMs?: number; queueItemId?: string; attachments?: string[] },
+  opts?: { delayMs?: number; queueItemId?: string; attachments?: string[]; notification?: boolean },
 ): void {
   const run = async () => {
     await context.sessionManager.getQueue().enqueue(session.sessionKey || session.sourceRef, async () => {
+      // A notification queued while its target was still running must not wake it
+      // if the target has since been stopped at the Claude limit (checked at dequeue).
+      if (opts?.notification) {
+        const current = getSession(session.id);
+        if (current && isStoppedAfterWork(current)) {
+          logger.warn(`Web session ${session.id}: dropped queued notification turn — session stopped after partial work`);
+          return;
+        }
+      }
       context.emit("session:started", { sessionId: session.id });
       await runWebSession(session, prompt, engine, config, context, opts?.attachments);
     }, opts?.queueItemId);
@@ -1061,6 +1072,11 @@ export async function handleApiRequest(
         context.emit("session:notification", { sessionId: session.id, message: prompt });
         // Don't return early — fall through to enqueue + dispatch so the engine
         // (e.g. the COO) actually processes the notification and can respond.
+        // Exception: a session stopped at the Claude limit after partial work.
+        if (isStoppedAfterWork(session)) {
+          logger.info(`Session ${session.id}: notification recorded, not dispatched (stopped after partial work)`);
+          return json(res, { status: "recorded", sessionId: session.id });
+        }
       }
 
       if (!isNotification && session.status === "waiting") {
@@ -1108,7 +1124,7 @@ export async function handleApiRequest(
       const queueItemId = enqueueQueueItem(session.id, sessionKey, prompt);
       context.emit("queue:updated", { sessionId: session.id, sessionKey });
 
-      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
+      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined, notification: isNotification });
 
       return json(res, { status: "queued", sessionId: session.id });
     }
@@ -2398,7 +2414,7 @@ function loadTranscriptMessages(engineSessionId: string): Array<{ role: string; 
 async function runWebSession(
   session: Session,
   prompt: string,
-  engine: Engine,
+  dispatchedEngine: Engine,
   config: JinnConfig,
   context: ApiContext,
   attachments?: string[],
@@ -2408,6 +2424,10 @@ async function runWebSession(
     logger.info(`Skipping deleted web session ${session.id} before run start`);
     return;
   }
+  // Run the engine the row names now. A queued turn can cross a usage-limit
+  // fallback flip (or its revert) after the dispatcher captured an engine, and
+  // the bin/model below follow the row — they must come from the same engine.
+  const engine = context.sessionManager.getEngine(currentSession.engine) ?? dispatchedEngine;
   logger.info(`Web session ${currentSession.id} running engine "${currentSession.engine}" (model: ${currentSession.model || "default"})`);
 
   // Ensure status is "running" (may already be set by the POST handler)
@@ -2497,13 +2517,18 @@ async function runWebSession(
       })()
       : prompt;
 
+    const runModel = resolveEngineModel(currentSession.engine, currentSession.model, engineConfig.model);
+    if (currentSession.model && runModel !== currentSession.model && !(currentSession.transportMeta as Record<string, unknown> | null)?.["engineOverride"]) {
+      logger.warn(`Web session ${currentSession.id}: model "${currentSession.model}" does not fit engine "${currentSession.engine}" — using ${runModel ?? "the engine default"}`);
+    }
+
     const result = await engine.run({
       prompt: promptToRun,
       resumeSessionId: currentSession.engineSessionId ?? undefined,
       systemPrompt,
       cwd: JINN_HOME,
       bin: engineConfig.bin,
-      model: currentSession.model ?? engineConfig.model,
+      model: runModel,
       effortLevel,
       cliFlags: employee?.cliFlags,
       mcpConfigPath,
@@ -2548,6 +2573,7 @@ async function runWebSession(
 
     if (rateLimit.limited) {
       recordClaudeRateLimit(rateLimit.resetsAt);
+
       const strategy = config.sessions?.rateLimitStrategy ?? "fallback";
 
       // Optional fallback: switch to GPT (Codex) while Claude resets
@@ -2594,6 +2620,7 @@ async function runWebSession(
           );
 
           const fallbackConfig = config.engines.codex;
+          const fallbackModel = resolveEngineModel(fallbackName, currentSession.model, fallbackConfig.model);
           const fallbackEffort = resolveEffort(fallbackConfig, currentSession, employee);
           const codexResume = typeof engineSessions.codex === "string" ? (engineSessions.codex as string) : undefined;
           const history = getMessages(currentSession.id)
@@ -2609,7 +2636,7 @@ async function runWebSession(
             systemPrompt,
             cwd: JINN_HOME,
             bin: fallbackConfig.bin,
-            model: currentSession.model ?? fallbackConfig.model,
+            model: fallbackModel,
             effortLevel: fallbackEffort,
             cliFlags: employee?.cliFlags,
             sessionId: currentSession.id,
@@ -2737,7 +2764,7 @@ async function runWebSession(
             systemPrompt,
             cwd: JINN_HOME,
             bin: engineConfig.bin,
-            model: current.model ?? engineConfig.model,
+            model: resolveEngineModel(currentSession.engine, current.model, engineConfig.model),
             effortLevel,
             cliFlags: employee?.cliFlags,
             sessionId: currentSession.id,
@@ -2854,7 +2881,7 @@ async function runWebSession(
         logSessionCost({
           sessionId: currentSession.id,
           engine: currentSession.engine,
-          model: currentSession.model ?? null,
+          model: resolveEngineModel(currentSession.engine, currentSession.model, engineConfig.model) ?? null,
           employee: currentSession.employee ?? null,
           costUsd: result.cost,
         });
@@ -2877,7 +2904,7 @@ async function runWebSession(
     context.sessionManager.firePostSessionHook?.({
       sessionId: currentSession.id,
       engine: currentSession.engine,
-      model: currentSession.model ?? null,
+      model: resolveEngineModel(currentSession.engine, currentSession.model, engineConfig.model) ?? null,
       employee: currentSession.employee ?? undefined,
       result: result.result,
       error: result.error,
