@@ -64,7 +64,7 @@ import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit } 
 import { resolveEngineModel } from "../shared/engineModel.js";
 import { isStoppedAfterWork } from "../sessions/budget.js";
 import { getClaudeExpectedResetAt, recordClaudeRateLimit } from "../shared/usageAwareness.js";
-import { loadJobs, saveJobs } from "../cron/jobs.js";
+import { loadJobs, loadJobsResult, saveJobs, jobsFileStatus, type JobsLoadFailure } from "../cron/jobs.js";
 import { reloadScheduler } from "../cron/scheduler.js";
 import { runCronJob } from "../cron/runner.js";
 import QRCode from "qrcode";
@@ -282,6 +282,11 @@ function badRequest(res: ServerResponse, message: string): void {
   json(res, { error: message }, 400);
 }
 
+/** 409 for a cron write while jobs.json is invalid: reason + parse position, never content. */
+function jobsFileConflict(res: ServerResponse, failure: JobsLoadFailure): void {
+  json(res, { error: "cron/jobs.json is invalid; refusing to write", reason: failure.reason, detail: failure.detail }, 409);
+}
+
 function serverError(res: ServerResponse, message: string): void {
   json(res, { error: message }, 500);
 }
@@ -457,6 +462,7 @@ export async function handleApiRequest(
         features: {
           claude_event_transport: claudeEventTransport,
         },
+        jobsFile: jobsFileStatus(),
       });
     }
 
@@ -1181,7 +1187,11 @@ export async function handleApiRequest(
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
-      const jobs = loadJobs();
+      // Fresh read, refuse if invalid: the old loadJobs() returned [] here and
+      // this handler then wrote [newJob] over every live job.
+      const loaded = loadJobsResult();
+      if (!loaded.ok) return jobsFileConflict(res, loaded);
+      const jobs = loaded.jobs;
       const newJob: CronJob = {
         id: body.id || crypto.randomUUID(),
         name: body.name || "untitled",
@@ -1203,13 +1213,16 @@ export async function handleApiRequest(
     // PUT /api/cron/:id
     params = matchRoute("/api/cron/:id", pathname);
     if (method === "PUT" && params) {
-      const jobs = loadJobs();
-      const idx = jobs.findIndex((j) => j.id === params!.id);
-      if (idx === -1) return notFound(res);
       const _parsed = await readJsonBody(req, res);
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
+      // Body first, then the fresh read: no await between the read and the save.
+      const loaded = loadJobsResult();
+      if (!loaded.ok) return jobsFileConflict(res, loaded);
+      const jobs = loaded.jobs;
+      const idx = jobs.findIndex((j) => j.id === params!.id);
+      if (idx === -1) return notFound(res);
       jobs[idx] = { ...jobs[idx], ...body, id: params.id };
       saveJobs(jobs);
       reloadScheduler(jobs);
@@ -1219,7 +1232,9 @@ export async function handleApiRequest(
     // DELETE /api/cron/:id
     params = matchRoute("/api/cron/:id", pathname);
     if (method === "DELETE" && params) {
-      const jobs = loadJobs();
+      const loaded = loadJobsResult();
+      if (!loaded.ok) return jobsFileConflict(res, loaded);
+      const jobs = loaded.jobs;
       const idx = jobs.findIndex((j) => j.id === params!.id);
       if (idx === -1) return notFound(res);
       const removed = jobs.splice(idx, 1)[0];

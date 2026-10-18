@@ -120,7 +120,7 @@ Common examples:
 
 ## Error Handling
 
-- If `jobs.json` is malformed, attempt to fix it. If unrecoverable, back it up as `jobs.json.bak` and start fresh with `[]`.
+- If `jobs.json` is malformed, fix only the syntax error at the line/column the gateway reports (`GET /api/status` → `jobsFile.detail`, the 409 body, or the ops alert) and re-read to verify; never replace it with `[]` or a partial set. The gateway keeps running the last-good schedule meanwhile; if the file cannot be fixed, copy `cron/jobs.lastgood.json` over it.
 - If a job name already exists when creating, warn the user and ask for a different name.
 - Validate the cron expression format before saving. Warn if the expression looks incorrect.
 - Validate that the timezone is a valid IANA timezone string.
