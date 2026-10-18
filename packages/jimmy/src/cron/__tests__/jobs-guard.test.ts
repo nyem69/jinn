@@ -176,6 +176,26 @@ describe("last-known-good", () => {
     expect(loadJobs().map((j) => j.id)).toEqual(["a", "b"]);
   });
 
+  it("(d) short writes are completed, and a zero-byte write fails without replacing the file", async () => {
+    const { saveJobs } = await load();
+    const realWrite = fs.writeSync.bind(fs) as (fd: number, b: Buffer, o: number, l: number) => number;
+    // Chunked: each call writes at most 7 bytes, as a partial write would.
+    const chunk = vi.spyOn(fs, "writeSync").mockImplementation(((fd: number, b: Buffer, o: number, l: number) =>
+      realWrite(fd, b, o, Math.min(l, 7))) as typeof fs.writeSync);
+    saveJobs([job("a"), job("b")]);
+    chunk.mockRestore();
+    expect((JSON.parse(fs.readFileSync(jobsPath, "utf-8")) as CronJob[]).map((j) => j.id)).toEqual(["a", "b"]);
+
+    const before = fs.readFileSync(jobsPath);
+    let calls = 0;
+    const stall = vi.spyOn(fs, "writeSync").mockImplementation(((fd: number, b: Buffer, o: number, l: number) =>
+      calls++ === 0 ? realWrite(fd, b, o, Math.min(l, 5)) : 0) as typeof fs.writeSync);
+    expect(() => saveJobs([job("a"), job("b"), job("c")])).toThrow(/short write/);
+    stall.mockRestore();
+    expect(fs.readFileSync(jobsPath).equals(before)).toBe(true);
+    expect(fs.readdirSync(path.dirname(jobsPath)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
   it("(f) boot falls back to jobs.lastgood.json and pages at once", async () => {
     writeJobs([job("a"), job("b"), job("c")]);
     (await load()).loadJobsResult(); // previous gateway run wrote the mirror

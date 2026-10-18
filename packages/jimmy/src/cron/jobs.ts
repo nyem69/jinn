@@ -440,7 +440,14 @@ function writeFileAtomic(target: string, data: string, modeFrom: string = target
   try {
     const fd = fs.openSync(tmp, "wx", mode);
     try {
-      fs.writeSync(fd, data);
+      // writeSync may write fewer bytes than asked (e.g. near a full disk);
+      // loop until all are on disk, and fail rather than rename a short file.
+      const buf = Buffer.from(data, "utf-8");
+      for (let off = 0; off < buf.length; ) {
+        const n = fs.writeSync(fd, buf, off, buf.length - off);
+        if (n <= 0) throw new Error(`short write to ${tmp} (${off}/${buf.length} bytes)`);
+        off += n;
+      }
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
