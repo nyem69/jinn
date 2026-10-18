@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { logger } from "../shared/logger.js";
+import { buildCleanEnv } from "../shared/cleanEnv.js";
 
 /**
  * Run a shell hook command. Pipes JSON payload to stdin, reads stdout.
@@ -16,7 +17,7 @@ export function runShellHook(
     const shell = process.platform === "win32" ? "cmd.exe" : "/bin/sh";
 
     const proc = spawn(shell, args, {
-      env: { ...process.env, ...env },
+      env: { ...buildCleanEnv(), ...env },
       stdio: ["pipe", "pipe", "pipe"],
       timeout: timeoutMs,
     });

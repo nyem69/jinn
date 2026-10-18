@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import type { CronJob } from "../shared/types.js";
 import { JINN_HOME } from "../shared/paths.js";
+import { buildCleanEnv } from "../shared/cleanEnv.js";
 
 export type PrecheckDecision = "proceed" | "skip" | "error";
 
@@ -54,7 +55,8 @@ export function runPrecheck(
       ["-c", command],
       {
         cwd: opts?.cwd ?? JINN_HOME,
-        env: opts?.env ?? process.env,
+        // Default = the gateway env minus root-class (T0) names (R9 #4).
+        env: opts?.env ?? buildCleanEnv(),
         timeout: timeoutMs,
         maxBuffer: MAX_OUTPUT_BYTES,
       },

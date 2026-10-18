@@ -33,6 +33,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { JsonObject, JsonValue } from "../../shared/types.js";
+import { buildCleanEnv } from "../../shared/cleanEnv.js";
 import { JailViolation, resolveInJail } from "./cwdJail.js";
 import type { ToolExecutionContext, ToolResult } from "./types.js";
 
@@ -293,6 +294,8 @@ export async function runCommandTool(raw: JsonObject, ctx: ToolExecutionContext)
   await new Promise<void>((resolve) => {
     const proc = spawn(command, args, {
       cwd: ctx.cwd,
+      // Inherits the gateway env as before, minus root-class (T0) names (R9 #4).
+      env: buildCleanEnv(),
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
