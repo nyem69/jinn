@@ -31,8 +31,14 @@ let tmpHome: string;
 let originalHome: string | undefined;
 let jobsPath: string;
 
-function fakeReq(method: string, url: string, body?: unknown): IncomingMessage {
-  const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as unknown as IncomingMessage;
+function fakeReq(method: string, url: string, body?: unknown, onRead?: () => void): IncomingMessage {
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
+  const req = Readable.from(
+    (function* () {
+      onRead?.();
+      yield* chunks;
+    })(),
+  ) as unknown as IncomingMessage;
   Object.assign(req, { method, url, headers: { host: "localhost" } });
   return req;
 }
@@ -53,7 +59,7 @@ function fakeRes(): ServerResponse & { status: number; body: unknown } {
   return res as unknown as ServerResponse & { status: number; body: unknown };
 }
 
-async function call(method: string, url: string, body?: unknown) {
+async function call(method: string, url: string, body?: unknown, onRead?: () => void) {
   const { handleApiRequest } = await import("../api.js");
   const res = fakeRes();
   const context = {
@@ -64,7 +70,7 @@ async function call(method: string, url: string, body?: unknown) {
     startTime: Date.now(),
     emit: vi.fn(),
   };
-  await handleApiRequest(fakeReq(method, url, body), res, context as never);
+  await handleApiRequest(fakeReq(method, url, body, onRead), res, context as never);
   return res;
 }
 
@@ -106,6 +112,14 @@ describe("/api/cron writes on an invalid jobs.json", () => {
     // Read-only GET still serves the last-good set rather than [].
     const list = await call("GET", "/api/cron");
     expect((list.body as Array<{ id: string }>).map((j) => j.id)).toEqual(["a"]);
+  });
+
+  it("PUT reads the file after the body: a file broken mid-request is refused, not overwritten", async () => {
+    fs.writeFileSync(jobsPath, JSON.stringify([{ id: "a", name: "a", enabled: true, schedule: "0 3 * * *" }]));
+    const res = await call("PUT", "/api/cron/a", { enabled: false }, () => fs.writeFileSync(jobsPath, BROKEN));
+    expect(res.status).toBe(409);
+    expect(fs.readFileSync(jobsPath, "utf-8")).toBe(BROKEN);
+    expect(reloadScheduler).not.toHaveBeenCalled();
   });
 
   it("POST still appends on a valid file, atomically", async () => {

@@ -77,7 +77,7 @@ If any JSON file (board.json, jobs.json, etc.) is malformed:
 2. Attempt to identify the syntax error (missing comma, bracket, quote).
 3. Fix the error and parse to verify.
 4. Write the corrected JSON back to the file.
-5. If the file is unrecoverable, back it up as `<filename>.bak` and create a fresh default (empty array `[]` for boards and job files).
+5. If the file is unrecoverable, back it up as `<filename>.bak` and create a fresh default (empty array `[]` for boards). Never do this to `cron/jobs.json`: `[]` unschedules every job. Fix the syntax error at the line/column the gateway reports, or copy `cron/jobs.lastgood.json` over it.
 
 ### Fix Malformed YAML
 

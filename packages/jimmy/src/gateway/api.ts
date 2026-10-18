@@ -1213,15 +1213,16 @@ export async function handleApiRequest(
     // PUT /api/cron/:id
     params = matchRoute("/api/cron/:id", pathname);
     if (method === "PUT" && params) {
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
+      // Body first, then the fresh read: no await between the read and the save.
       const loaded = loadJobsResult();
       if (!loaded.ok) return jobsFileConflict(res, loaded);
       const jobs = loaded.jobs;
       const idx = jobs.findIndex((j) => j.id === params!.id);
       if (idx === -1) return notFound(res);
-      const _parsed = await readJsonBody(req, res);
-      if (!_parsed.ok) return;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const body = _parsed.body as any;
       jobs[idx] = { ...jobs[idx], ...body, id: params.id };
       saveJobs(jobs);
       reloadScheduler(jobs);

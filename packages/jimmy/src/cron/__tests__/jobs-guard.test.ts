@@ -62,21 +62,28 @@ afterEach(() => {
 });
 
 describe("loadJobsResult", () => {
-  it("reports a parse error with position only, never file content", async () => {
-    fs.writeFileSync(jobsPath, BROKEN_2);
+  // V8 gives no position for most of these; the guard must still locate them.
+  it.each([
+    ["a stray word", BROKEN, "Unexpected token at line 3 column 3"],
+    ["a trailing comma", `[\n  {"id": "a", "prompt": "${SECRET}"},\n]\n`, "Unexpected token ']' at line 3 column 1"],
+    [
+      "an unquoted value",
+      `[\n  {\n    "id": "a",\n    "name": job 25,\n    "prompt": "${SECRET}"\n  }\n]\n`,
+      "Unexpected token at line 4 column 13",
+    ],
+    ["a truncated file", BROKEN_2, "Unexpected end of JSON input at line 3 column 1 (file truncated?)"],
+    ["a BOM", `\uFEFF[{"prompt": "${SECRET}"}]`, "Unexpected byte-order mark at line 1 column 1"],
+    ["a missing comma (V8 positioned)", `[\n  {"prompt": "${SECRET}"}\n  {}\n]`, "Expected ',' or ']' after array element at line 3 column 3"],
+  ])("reports %s by line and column, never file content", async (_label, raw, detail) => {
+    fs.writeFileSync(jobsPath, raw);
     const { loadJobsResult } = await load();
     const r = loadJobsResult();
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.reason).toBe("parse");
     expect(r.hash).toMatch(/^[0-9a-f]{12}$/);
-    expect(r.detail).toMatch(/line \d+ column \d+|end of JSON/);
+    expect(r.detail).toBe(detail);
     expect(r.detail).not.toContain(SECRET);
-
-    fs.writeFileSync(jobsPath, BROKEN);
-    const r2 = loadJobsResult();
-    expect(r2.ok).toBe(false);
-    if (!r2.ok) expect(r2.detail).not.toContain(SECRET);
   });
 
   it("treats a non-array as an error and a valid [] as a deliberate empty set", async () => {
@@ -98,6 +105,16 @@ describe("loadJobsResult", () => {
     fs.rmSync(jobsPath);
     expect(loadJobsResult()).toMatchObject({ ok: false, reason: "missing" });
   });
+
+  it("a missing file with a corrupt jobs.lastgood.json is an error, and boot pages ZERO jobs", async () => {
+    fs.writeFileSync(lastGoodPath, BROKEN);
+    const { loadJobsResult, loadJobsForBoot } = await load();
+    expect(loadJobsResult()).toMatchObject({ ok: false, reason: "missing" });
+    const boot = loadJobsForBoot();
+    expect(boot).toMatchObject({ source: "none", jobs: [] });
+    expect(opsAlert).toHaveBeenCalledTimes(1);
+    expect(opsAlert.mock.calls[0][0]).toMatch(/ZERO cron jobs/);
+  });
 });
 
 describe("last-known-good", () => {
@@ -117,6 +134,48 @@ describe("last-known-good", () => {
     expect(fs.readFileSync(lastGoodPath, "utf-8")).toBe(raw2);
   });
 
+  it("a big shrink is honoured but keeps the replaced set in jobs.lastgood.prev.json", async () => {
+    const prevPath = path.join(tmpHome, "cron", "jobs.lastgood.prev.json");
+    const many = [job("a"), job("b"), job("c"), job("d")];
+    writeJobs(many);
+    const { loadJobsResult, loadJobs } = await load();
+    loadJobsResult();
+
+    writeJobs([job("a"), job("b"), job("c")]); // small shrink: no rotation
+    loadJobsResult();
+    expect(fs.existsSync(prevPath)).toBe(false);
+
+    const empty = writeJobs([]); // a session "starts fresh with []"
+    expect(loadJobs()).toEqual([]); // honoured live
+    expect(fs.readFileSync(lastGoodPath, "utf-8")).toBe(empty);
+    const prev = JSON.parse(fs.readFileSync(prevPath, "utf-8")) as CronJob[];
+    expect(prev.map((j) => j.id)).toEqual(["a", "b", "c"]);
+
+    // A later 1 -> 0 shrink must not evict the bigger restore copy.
+    writeJobs([job("x")]);
+    loadJobsResult();
+    writeJobs([]);
+    loadJobsResult();
+    expect((JSON.parse(fs.readFileSync(prevPath, "utf-8")) as CronJob[]).map((j) => j.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("a writer's failed save does not leak its edit into the last-good set", async () => {
+    writeJobs([job("a"), job("b")]);
+    const { loadJobsResult, loadJobs, saveJobs } = await load();
+    const r = loadJobsResult();
+    if (!r.ok) throw new Error("expected a good load");
+    r.jobs.push(job("phantom")); // what POST does before saveJobs
+    const spy = vi.spyOn(fs, "writeSync").mockImplementation(() => {
+      throw new Error("ENOSPC: simulated disk full");
+    });
+    expect(() => saveJobs(r.jobs)).toThrow(/ENOSPC/);
+    spy.mockRestore();
+
+    loadJobsResult(); // same bytes: early return on equal hash
+    fs.writeFileSync(jobsPath, BROKEN);
+    expect(loadJobs().map((j) => j.id)).toEqual(["a", "b"]);
+  });
+
   it("(f) boot falls back to jobs.lastgood.json and pages at once", async () => {
     writeJobs([job("a"), job("b"), job("c")]);
     (await load()).loadJobsResult(); // previous gateway run wrote the mirror
@@ -132,6 +191,12 @@ describe("last-known-good", () => {
     expect(loadJobs()).toHaveLength(3);
     // Writers still see the invalid file, not the fallback.
     expect(loadJobsResult().ok).toBe(false);
+    // Boot already paged for these bytes; later ticks don't page again.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61_000);
+    loadJobsResult();
+    loadJobsResult();
+    expect(opsAlert).toHaveBeenCalledTimes(1);
   });
 
   it("(f) boot with an invalid file and no mirror pages that the schedule is empty", async () => {
@@ -196,6 +261,29 @@ describe("ops alert", () => {
     const recoveries = vi.mocked(logger.info).mock.calls.filter(([m]) => /valid again/.test(String(m)));
     expect(recoveries).toHaveLength(1);
   });
+
+  it("(c) the same bad bytes after a recovery page again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-20T00:00:00Z"));
+    writeJobs([job("a")]);
+    const { loadJobsResult } = await load();
+    loadJobsResult();
+
+    fs.writeFileSync(jobsPath, BROKEN);
+    loadJobsResult();
+    vi.advanceTimersByTime(61_000);
+    loadJobsResult();
+    expect(opsAlert).toHaveBeenCalledTimes(1);
+
+    writeJobs([job("a")]); // operator fixes it
+    loadJobsResult();
+
+    fs.writeFileSync(jobsPath, BROKEN); // a session re-applies the same broken edit
+    loadJobsResult();
+    vi.advanceTimersByTime(61_000);
+    loadJobsResult();
+    expect(opsAlert).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("saveJobs", () => {
@@ -207,6 +295,7 @@ describe("saveJobs", () => {
     const left = fs.readdirSync(path.dirname(jobsPath)).sort();
     expect(left).toEqual(["jobs.json", "jobs.lastgood.json"]);
     expect(fs.statSync(jobsPath).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(lastGoodPath).mode & 0o777).toBe(0o600); // the mirror is never looser
     const r = loadJobsResult();
     expect(r.ok && r.jobs.map((j) => j.id)).toEqual(["a", "b"]);
   });
